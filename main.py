@@ -22,11 +22,17 @@ PHONE = os.environ["PHONE"]
 SECRET_KEY = os.environ.get("API_KEY", "chave-secreta")
 
 app = FastAPI()
-client = TelegramClient("session", API_ID, API_HASH)
+session_path = "/data/session"  # Railway tem /data/ persistente
+client = TelegramClient(session_path, API_ID, API_HASH)
 
 @app.on_event("startup")
 async def startup():
-    await client.start(phone=PHONE)
+    try:
+        if client.is_connected():
+            return
+        await client.start(phone=PHONE)
+    except Exception as e:
+        print(f"Erro ao conectar: {e}")
 
 def check_key(x_api_key: str = Header(...)):
     if x_api_key != SECRET_KEY:
