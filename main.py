@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from telethon import TelegramClient
+from telethon.sessions import StringSession
 from telethon.tl.functions.channels import GetParticipantsRequest
 from telethon.tl.types import ChannelParticipantsSearch
 import os
@@ -10,8 +11,9 @@ API_HASH = os.environ["API_HASH"]
 PHONE = os.environ["PHONE"]
 SECRET_KEY = os.environ.get("API_KEY", "chave-secreta")
 
-session_path = "/data/session"
-client = TelegramClient(session_path, API_ID, API_HASH)
+# Use StringSession em vez de arquivo
+session_string = os.environ.get("SESSION_STRING", "")
+client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
 
 app = FastAPI()
 
@@ -28,8 +30,10 @@ async def startup():
     try:
         if client.is_connected():
             return
-        os.makedirs("/data", exist_ok=True)
         await client.start(phone=PHONE, password=os.environ.get("TELEGRAM_PASSWORD"))
+        # Salvar a sessão pra próxima vez
+        session_str = client.session.save()
+        print(f"SESSION_STRING={session_str}")
     except Exception as e:
         print(f"Erro: {e}")
 
