@@ -1,10 +1,17 @@
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from telethon import TelegramClient
 from telethon.tl.functions.channels import GetParticipantsRequest
 from telethon.tl.types import ChannelParticipantsSearch
 import os
 
-from fastapi.middleware.cors import CORSMiddleware
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
+PHONE = os.environ["PHONE"]
+SECRET_KEY = os.environ.get("API_KEY", "chave-secreta")
+
+session_path = "/data/session"
+client = TelegramClient(session_path, API_ID, API_HASH)
 
 app = FastAPI()
 
@@ -16,15 +23,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-API_ID = int(os.environ["API_ID"])
-API_HASH = os.environ["API_HASH"]
-PHONE = os.environ["PHONE"]
-SECRET_KEY = os.environ.get("API_KEY", "chave-secreta")
-
-app = FastAPI()
-session_path = "/data/session"  # Railway tem /data/ persistente
-client = TelegramClient(session_path, API_ID, API_HASH)
-
 @app.on_event("startup")
 async def startup():
     try:
@@ -34,7 +32,7 @@ async def startup():
         await client.start(phone=PHONE, password=os.environ.get("TELEGRAM_PASSWORD"))
     except Exception as e:
         print(f"Erro: {e}")
-        
+
 def check_key(x_api_key: str = Header(...)):
     if x_api_key != SECRET_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
