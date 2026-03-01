@@ -30,10 +30,11 @@ async def startup():
     try:
         if client.is_connected():
             return
-        await client.start(phone=PHONE)
+        os.makedirs("/data", exist_ok=True)
+        await client.start(phone=PHONE, password=os.environ.get("TELEGRAM_PASSWORD"))
     except Exception as e:
-        print(f"Erro ao conectar: {e}")
-
+        print(f"Erro: {e}")
+        
 def check_key(x_api_key: str = Header(...)):
     if x_api_key != SECRET_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
