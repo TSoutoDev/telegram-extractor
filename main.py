@@ -156,6 +156,24 @@ def parse_signal(text: str) -> Optional[dict]:
         "status": "pending",
     }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# WHATSAPP — Evolution API
+# ─────────────────────────────────────────────────────────────────────────────
+async def enviar_whatsapp(mensagem: str):
+    if not all([EVOLUTION_URL, EVOLUTION_TOKEN, WHATSAPP_NUMBER, EVOLUTION_INSTANCE]):
+        log.warning("WhatsApp não configurado — pulando")
+        return
+    url = f"{EVOLUTION_URL}/message/sendText/{EVOLUTION_INSTANCE}"
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(url,
+                headers={"apikey": EVOLUTION_TOKEN, "Content-Type": "application/json"},
+                json={"number": WHATSAPP_NUMBER, "text": mensagem, "delay": 0}
+            )
+            log.info(f"WhatsApp {'OK' if r.status_code==201 else 'ERRO '+str(r.status_code)}: {mensagem[:60]}")
+    except Exception as e:
+        log.error(f"WhatsApp exceção: {e}")
+
 def fmt_sinal(s: dict) -> str:
     tps = "\n".join([f"  TP{i+1}: {t}" for i, t in enumerate(s['tps'])])
     return (f"🔔 *SINAL RECEBIDO*\n"
