@@ -63,12 +63,37 @@ class ConfirmRequest(BaseModel):
 # PARSER DE SINAIS
 # ─────────────────────────────────────────────────────────────────────────────
 SYMBOL_MAP = {
-    "gold": "XAUUSD", "xauusd": "XAUUSD",
+    # Metais
+    "gold": "XAUUSD",   "xauusd": "XAUUSD",
+    "silver": "XAGUSD", "xagusd": "XAGUSD",
+    # Forex majors
     "eurusd": "EURUSD", "gbpusd": "GBPUSD",
-    "usdjpy": "USDJPY", "btcusd": "BTCUSD",
-    "xagusd": "XAGUSD", "silver": "XAGUSD",
+    "usdjpy": "USDJPY", "usdchf": "USDCHF",
+    "audusd": "AUDUSD", "nzdusd": "NZDUSD",
+    "usdcad": "USDCAD",
+    # Forex cruzados
+    "eurjpy": "EURJPY", "gbpjpy": "GBPJPY",
+    "eurgbp": "EURGBP", "euraud": "EURAUD",
+    "eurjpy": "EURJPY", "eurcad": "EURCAD",
+    "gbpaud": "GBPAUD", "gbpcad": "GBPCAD",
+    "gbpchf": "GBPCHF", "audcad": "AUDCAD",
+    "audjpy": "AUDJPY", "cadjpy": "CADJPY",
+    "chfjpy": "CHFJPY", "audnzd": "AUDNZD",
+    # Índices
     "nas100": "NAS100", "nasdaq": "NAS100",
-    "us30": "US30", "dow": "US30",
+    "us30": "US30",     "dow": "US30",
+    "us500": "US500",   "sp500": "US500",
+    "uk100": "UK100",   "ftse": "UK100",
+    "ger40": "GER40",   "dax": "GER40",
+    "jp225": "JP225",   "nikkei": "JP225",
+    # Cripto
+    "btcusd": "BTCUSD", "bitcoin": "BTCUSD",
+    "ethusd": "ETHUSD", "ethereum": "ETHUSD",
+    "ltcusd": "LTCUSD", "litecoin": "LTCUSD",
+    "xrpusd": "XRPUSD", "ripple": "XRPUSD",
+    # Energia
+    "usoil": "USOIL",   "wti": "USOIL",
+    "ukoil": "UKOIL",   "brent": "UKOIL",
 }
 
 def parse_signal(text: str) -> Optional[dict]:
