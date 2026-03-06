@@ -131,19 +131,34 @@ def parse_signal(text: str) -> Optional[dict]:
     if not trade_type:
         return None
 
-    # Detectar entry
+    # Detectar entry — vários padrões
     entry = None
-    m = re.search(r'(\d{3,6}(?:\.\d+)?)\s*/\s*(\d{3,6}(?:\.\d+)?)', header)
+    # Padrão: "between X till/to/and Y" (Forex)
+    m = re.search(r'between\s+(\d+(?:\.\d+)?)\s+(?:till|to|and|-)\s+(\d+(?:\.\d+)?)', full_text_up)
     if m:
         entry = float(m.group(2))
-    else:
-        m = re.search(r'@\s*(\d{3,6}(?:\.\d+)?)', header)
+    # Padrão: "X/Y" (Gold Pro Trader)
+    if not entry:
+        for line in lines:
+            h = re.sub(r'[^\w\s/\.\-]', ' ', line.upper())
+            m = re.search(r'(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)', h)
+            if m:
+                entry = float(m.group(2))
+                break
+    # Padrão: "@ X"
+    if not entry:
+        m = re.search(r'@\s*(\d+(?:\.\d+)?)', full_text_up)
         if m:
             entry = float(m.group(1))
-        else:
-            nums = re.findall(r'\d{3,6}(?:\.\d+)?', header)
-            if nums:
-                entry = float(nums[-1])
+    # Fallback: último número da linha com BUY/SELL/símbolo
+    if not entry:
+        for line in lines:
+            h = re.sub(r'[^\w\s/\.\-]', ' ', line.upper())
+            if re.search(r'\bBUY\b|\bSELL\b|\bBUY\b', h) or any(k.upper() in h for k in SYMBOL_MAP):
+                nums = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', h) if float(n) > 1]
+                if nums:
+                    entry = nums[-1]
+                    break
     if not entry:
         return None
 
@@ -151,19 +166,20 @@ def parse_signal(text: str) -> Optional[dict]:
     tps, sl = [], None
     for line in lines:
         up = line.upper().replace('.', ' ').replace(':', ' ')
-        if re.search(r'\bSL\b|\bSTOP\b', up):
-            nums = re.findall(r'\d{3,6}(?:\.\d+)?', line)
+        # Stop Loss antes de SL para pegar "Stop Loss: X"
+        if re.search(r'\bSTOP\s*LOSS\b|\bSL\b', up):
+            nums = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', line) if float(n) > 1]
             if nums:
-                sl = float(nums[-1])
+                sl = nums[-1]
         elif re.search(r'\bTP\b|\bTARGET\b|\bALVO\b', up):
-            nums = re.findall(r'\d{3,6}(?:\.\d+)?', line)
+            nums = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', line) if float(n) > 1]
             if nums:
-                tps.append(float(nums[-1]))
+                tps.append(nums[-1])
 
     # Fallback — extrair TPs do texto completo
     if not tps:
-        tp_matches = re.findall(r'TP\s*\d*[\s.:]*?(\d{3,6}(?:\.\d+)?)', full_text_up)
-        tps = [float(v) for v in tp_matches]
+        tp_matches = re.findall(r'TP\s*\d*[\s.:]*?(\d+(?:\.\d+)?)', full_text_up)
+        tps = [float(v) for v in tp_matches if float(v) > 1]
 
     if not tps:
         return None
