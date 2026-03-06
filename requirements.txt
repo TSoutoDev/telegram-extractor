@@ -2,3 +2,4 @@ telethon
 fastapi
 uvicorn
 python-dotenv
+httpx
