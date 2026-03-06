@@ -246,7 +246,8 @@ async def get_pending(authorization: str = Header("")):
     """MT5 consulta sinal pendente a cada 5 segundos"""
     check_token(authorization)
     if not signal_queue:
-        return JSONResponse(status_code=204, content=None)
+        from fastapi.responses import Response
+        return Response(status_code=204)
     return JSONResponse(status_code=200, content=signal_queue[0])
 
 @app.post("/signal/confirm")
@@ -256,9 +257,16 @@ async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
 
     sinal = next((s for s in signal_queue if s["id"] == body.id), None)
     if not sinal:
-        raise HTTPException(status_code=404, detail="Sinal não encontrado na fila")
+        # Sinal já foi processado — buscar no histórico
+        sinal_hist = next((s for s in signal_history if s["id"] == body.id), None)
+        if sinal_hist:
+            return {"ok": True, "id": body.id, "status": "already_confirmed"}
+        # Criar entrada mínima para não quebrar o WhatsApp
+        sinal = {"id": body.id, "symbol": "?", "type": "?", "entry": 0,
+                 "tps": [], "sl": 0, "source": "MT5"}
 
-    signal_queue.remove(sinal)
+    if sinal in signal_queue:
+        signal_queue.remove(sinal)
     sinal.update({"status": body.status, "mt5_msg": body.message,
                   "account": body.account,
                   "executed": datetime.now(timezone.utc).isoformat()})
