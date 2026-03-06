@@ -142,6 +142,20 @@ def parse_signal(text: str) -> Optional[dict]:
 
     if not tps:
         return None
+
+    return {
+        "id":     str(uuid.uuid4()),
+        "symbol": symbol,
+        "type":   trade_type,
+        "entry":  entry,
+        "sl":     sl or 0.0,
+        "tps":    tps,
+        "source": "Telegram",
+        "raw":    text_clean[:300],
+        "time":   datetime.now(timezone.utc).isoformat(),
+        "status": "pending",
+    }
+
 def fmt_sinal(s: dict) -> str:
     tps = "\n".join([f"  TP{i+1}: {t}" for i, t in enumerate(s['tps'])])
     return (f"🔔 *SINAL RECEBIDO*\n"
