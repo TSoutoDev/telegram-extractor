@@ -72,7 +72,10 @@ SYMBOL_MAP = {
 }
 
 def parse_signal(text: str) -> Optional[dict]:
-    text_clean = text.strip()
+    # Normalizar \n literal para quebra de linha real
+    text_clean = text.strip().replace('\\n', '\n')
+    text_clean = re.sub(r'\s*[|;]\s*', '\n', text_clean)
+
     lines = [l.strip() for l in text_clean.split("\n") if l.strip()]
     if not lines:
         return None
@@ -81,25 +84,29 @@ def parse_signal(text: str) -> Optional[dict]:
     header = re.sub(r'[^\w\s/\.\-]', ' ', lines[0].upper())
     header = re.sub(r'\s+', ' ', header).strip()
 
-    # Detectar símbolo
+    # Detectar símbolo em todas as linhas
     symbol = None
-    for key, val in SYMBOL_MAP.items():
-        if key.upper() in header:
-            symbol = val
+    for search in [header] + [l.upper() for l in lines[1:]]:
+        for key, val in SYMBOL_MAP.items():
+            if key.upper() in search:
+                symbol = val
+                break
+        if symbol:
             break
     if not symbol:
         return None
 
-    # Detectar tipo BUY/SELL
+    # Detectar tipo BUY/SELL no texto completo
+    full_text_up = text_clean.upper()
     trade_type = None
-    if re.search(r'\bBUY\b|\bCOMPRA\b|\bLONG\b', header):
+    if re.search(r'\bBUY\b|\bCOMPRA\b|\bLONG\b', full_text_up):
         trade_type = "BUY"
-    elif re.search(r'\bSELL\b|\bVENDA\b|\bSHORT\b', header):
+    elif re.search(r'\bSELL\b|\bVENDA\b|\bSHORT\b', full_text_up):
         trade_type = "SELL"
     if not trade_type:
         return None
 
-    # Detectar entry — "5193/5188" pega o segundo valor (preço de entrada)
+    # Detectar entry
     entry = None
     m = re.search(r'(\d{3,6}(?:\.\d+)?)\s*/\s*(\d{3,6}(?:\.\d+)?)', header)
     if m:
@@ -115,9 +122,9 @@ def parse_signal(text: str) -> Optional[dict]:
     if not entry:
         return None
 
-    # TPs e SL nas linhas seguintes
+    # TPs e SL em todas as linhas
     tps, sl = [], None
-    for line in lines[1:]:
+    for line in lines:
         up = line.upper().replace('.', ' ').replace(':', ' ')
         if re.search(r'\bSL\b|\bSTOP\b', up):
             nums = re.findall(r'\d{3,6}(?:\.\d+)?', line)
@@ -128,40 +135,13 @@ def parse_signal(text: str) -> Optional[dict]:
             if nums:
                 tps.append(float(nums[-1]))
 
+    # Fallback — extrair TPs do texto completo
+    if not tps:
+        tp_matches = re.findall(r'TP\s*\d*[\s.:]*?(\d{3,6}(?:\.\d+)?)', full_text_up)
+        tps = [float(v) for v in tp_matches]
+
     if not tps:
         return None
-
-    return {
-        "id":     str(uuid.uuid4()),
-        "symbol": symbol,
-        "type":   trade_type,
-        "entry":  entry,
-        "sl":     sl or 0.0,
-        "tps":    tps,
-        "source": "Telegram",
-        "raw":    text_clean[:300],
-        "time":   datetime.now(timezone.utc).isoformat(),
-        "status": "pending",
-    }
-
-# ─────────────────────────────────────────────────────────────────────────────
-# WHATSAPP — Evolution API
-# ─────────────────────────────────────────────────────────────────────────────
-async def enviar_whatsapp(mensagem: str):
-    if not all([EVOLUTION_URL, EVOLUTION_TOKEN, WHATSAPP_NUMBER, EVOLUTION_INSTANCE]):
-        log.warning("WhatsApp não configurado — pulando")
-        return
-    url = f"{EVOLUTION_URL}/message/sendText/{EVOLUTION_INSTANCE}"
-    try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.post(url,
-                headers={"apikey": EVOLUTION_TOKEN, "Content-Type": "application/json"},
-                json={"number": WHATSAPP_NUMBER, "text": mensagem, "delay": 0}
-            )
-            log.info(f"WhatsApp {'OK' if r.status_code==201 else 'ERRO '+str(r.status_code)}: {mensagem[:60]}")
-    except Exception as e:
-        log.error(f"WhatsApp exceção: {e}")
-
 def fmt_sinal(s: dict) -> str:
     tps = "\n".join([f"  TP{i+1}: {t}" for i, t in enumerate(s['tps'])])
     return (f"🔔 *SINAL RECEBIDO*\n"
