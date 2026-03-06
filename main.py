@@ -286,7 +286,7 @@ async def clear_queue(authorization: str = Header("")):
 
 @app.post("/signal/test")
 async def test_signal(request_body: dict, authorization: str = Header("")):
-    """Injeta sinal manualmente para testar o MT5"""
+    """Injeta sinal manualmente para testar o MT5 e WhatsApp"""
     check_token(authorization)
     text = request_body.get("text", "")
     if not text:
@@ -294,7 +294,10 @@ async def test_signal(request_body: dict, authorization: str = Header("")):
     sinal = parse_signal(text)
     if not sinal:
         raise HTTPException(status_code=422, detail="Texto não reconhecido como sinal")
+    sinal["source"] = "Teste Manual"
     signal_queue.append(sinal)
+    # Disparar WhatsApp igual ao fluxo real
+    await enviar_whatsapp(fmt_sinal(sinal))
     return {"ok": True, "signal": sinal}
 
 # ─────────────────────────────────────────────────────────────────────────────
