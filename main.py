@@ -31,7 +31,6 @@ EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 WHATSAPP_NUMBER    = os.environ.get("WHATSAPP_NUMBER", "")
 
 # IDs dos grupos monitorados (negativos, separados por vírgula)
-# Ex: TELEGRAM_SIGNAL_GROUPS=-1001234567890,-1009876543210
 SIGNAL_GROUPS = [
     int(x.strip())
     for x in os.environ.get("TELEGRAM_SIGNAL_GROUPS", "").split(",")
@@ -43,7 +42,7 @@ signal_queue:   list[dict] = []
 signal_history: list[dict] = []
 
 # ── app ───────────────────────────────────────────────────────────────────────
-app = FastAPI(title="TS Signal Bridge", version="2.0.0")
+app = FastAPI(title="TS Signal Bridge", version="2.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -74,11 +73,12 @@ SYMBOL_MAP = {
     # Forex cruzados
     "eurjpy": "EURJPY", "gbpjpy": "GBPJPY",
     "eurgbp": "EURGBP", "euraud": "EURAUD",
-    "eurjpy": "EURJPY", "eurcad": "EURCAD",
+    "eurcad": "EURCAD",
     "gbpaud": "GBPAUD", "gbpcad": "GBPCAD",
     "gbpchf": "GBPCHF", "audcad": "AUDCAD",
     "audjpy": "AUDJPY", "cadjpy": "CADJPY",
     "chfjpy": "CHFJPY", "audnzd": "AUDNZD",
+    "eurnzd": "EURNZD", "gbpnzd": "GBPNZD",
     # Índices
     "nas100": "NAS100", "nasdaq": "NAS100",
     "us30": "US30",     "dow": "US30",
@@ -95,6 +95,10 @@ SYMBOL_MAP = {
     "usoil": "USOIL",   "wti": "USOIL",
     "ukoil": "UKOIL",   "brent": "UKOIL",
 }
+
+def extrair_numeros(line: str, min_val: float = 0.0001) -> list:
+    """Extrai números da linha ORIGINAL (sem substituir pontos decimais)."""
+    return [float(n) for n in re.findall(r'\d+(?:\.\d+)?', line) if float(n) > min_val]
 
 def parse_signal(text: str) -> Optional[dict]:
     # Normalizar \n literal para quebra de linha real
@@ -133,10 +137,12 @@ def parse_signal(text: str) -> Optional[dict]:
 
     # Detectar entry — vários padrões
     entry = None
-    # Padrão: "between X till/to/and Y" (Forex)
+
+    # Padrão: "between X till/to/and Y" (Forex GDP)
     m = re.search(r'between\s+(\d+(?:\.\d+)?)\s+(?:till|to|and|-)\s+(\d+(?:\.\d+)?)', full_text_up)
     if m:
         entry = float(m.group(2))
+
     # Padrão: "X/Y" (Gold Pro Trader)
     if not entry:
         for line in lines:
@@ -145,44 +151,58 @@ def parse_signal(text: str) -> Optional[dict]:
             if m:
                 entry = float(m.group(2))
                 break
+
     # Padrão: "@ X"
     if not entry:
         m = re.search(r'@\s*(\d+(?:\.\d+)?)', full_text_up)
         if m:
             entry = float(m.group(1))
+
     # Fallback: último número da linha com BUY/SELL/símbolo
     if not entry:
         for line in lines:
             h = re.sub(r'[^\w\s/\.\-]', ' ', line.upper())
-            if re.search(r'\bBUY\b|\bSELL\b|\bBUY\b', h) or any(k.upper() in h for k in SYMBOL_MAP):
-                nums = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', h) if float(n) > 1]
+            if re.search(r'\bBUY\b|\bSELL\b', h) or any(k.upper() in h for k in SYMBOL_MAP):
+                nums = extrair_numeros(line, min_val=0.0001)
                 if nums:
                     entry = nums[-1]
                     break
+
     if not entry:
         return None
 
-    # TPs e SL em todas as linhas
+    # ── TPs e SL ─────────────────────────────────────────────────────────────
+    # FIX: usar a linha ORIGINAL para extrair números (preserva ponto decimal)
+    # O bug anterior fazia replace('.', ' ') no texto usado para extrair números,
+    # o que quebrava preços como 0.7095 → "0 7095" (inválido para Forex)
     tps, sl = [], None
+
     for line in lines:
-        up = line.upper().replace('.', ' ').replace(':', ' ')
-        # Stop Loss antes de SL para pegar "Stop Loss: X"
-        if re.search(r'\bSTOP\s*LOSS\b|\bSL\b', up):
-            nums = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', line) if float(n) > 1]
+        # Usar upper() SEM substituir pontos para detectar palavras-chave
+        up_keyword = line.upper()
+
+        if re.search(r'\bSTOP\s*LOSS\b|\bSL\b', up_keyword):
+            # Extrair da linha ORIGINAL para preservar decimais
+            nums = extrair_numeros(line, min_val=0.0001)
             if nums:
                 sl = nums[-1]
-        elif re.search(r'\bTP\b|\bTARGET\b|\bALVO\b', up):
-            nums = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', line) if float(n) > 1]
+
+        elif re.search(r'\bTP\b|\bTARGET\b|\bALVO\b', up_keyword):
+            # Extrair da linha ORIGINAL para preservar decimais
+            nums = extrair_numeros(line, min_val=0.0001)
             if nums:
                 tps.append(nums[-1])
 
     # Fallback — extrair TPs do texto completo
     if not tps:
-        tp_matches = re.findall(r'TP\s*\d*[\s.:]*?(\d+(?:\.\d+)?)', full_text_up)
-        tps = [float(v) for v in tp_matches if float(v) > 1]
+        tp_matches = re.findall(r'(?:TP\s*\d*|TARGET\s*\d*)[\s.:]*?(\d+(?:\.\d+)?)', full_text_up)
+        tps = [float(v) for v in tp_matches if float(v) > 0.0001]
 
     if not tps:
         return None
+
+    # Limitar a 4 TPs (EA suporta no máximo 4)
+    tps = tps[:4]
 
     return {
         "id":     str(uuid.uuid4()),
@@ -232,10 +252,6 @@ def fmt_exec(s: dict, status: str, msg: str) -> str:
 # LISTENER DO TELETHON — captura mensagens dos grupos
 # ─────────────────────────────────────────────────────────────────────────────
 def registrar_listener():
-    """
-    Registra o handler de novas mensagens.
-    Se SIGNAL_GROUPS estiver vazio, monitora TODOS os grupos.
-    """
     @client.on(events.NewMessage(chats=SIGNAL_GROUPS if SIGNAL_GROUPS else None))
     async def handler(event):
         if not event.is_group and not event.is_channel:
@@ -249,11 +265,12 @@ def registrar_listener():
 
         sinal = parse_signal(texto)
         if not sinal:
+            log.info(f"Mensagem não reconhecida como sinal — ignorada")
             return
 
         sinal["source"] = nome
         signal_queue.append(sinal)
-        log.info(f"✅ Sinal enfileirado: {sinal['id']} | {sinal['type']} {sinal['symbol']} @ {sinal['entry']} | {len(sinal['tps'])} TPs")
+        log.info(f"✅ Sinal enfileirado: {sinal['id']} | {sinal['type']} {sinal['symbol']} @ {sinal['entry']} | {len(sinal['tps'])} TPs | SL: {sinal['sl']}")
 
         await enviar_whatsapp(fmt_sinal(sinal))
 
@@ -316,11 +333,9 @@ async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
 
     sinal = next((s for s in signal_queue if s["id"] == body.id), None)
     if not sinal:
-        # Sinal já foi processado — buscar no histórico
         sinal_hist = next((s for s in signal_history if s["id"] == body.id), None)
         if sinal_hist:
             return {"ok": True, "id": body.id, "status": "already_confirmed"}
-        # Criar entrada mínima para não quebrar o WhatsApp
         sinal = {"id": body.id, "symbol": "?", "type": "?", "entry": 0,
                  "tps": [], "sl": 0, "source": "MT5"}
 
@@ -363,12 +378,11 @@ async def test_signal(request_body: dict, authorization: str = Header("")):
         raise HTTPException(status_code=422, detail="Texto não reconhecido como sinal")
     sinal["source"] = "Teste Manual"
     signal_queue.append(sinal)
-    # Disparar WhatsApp igual ao fluxo real
     await enviar_whatsapp(fmt_sinal(sinal))
     return {"ok": True, "signal": sinal}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ENDPOINTS — seu código original preservado
+# ENDPOINTS — utilitários
 # ─────────────────────────────────────────────────────────────────────────────
 @app.get("/groups")
 async def list_groups(authorization: str = Header("")):
