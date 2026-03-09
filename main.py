@@ -182,14 +182,18 @@ def parse_signal(text: str) -> Optional[dict]:
         up_keyword = line.upper()
 
         if re.search(r'\bSTOP\s*LOSS\b|\bSL\b', up_keyword):
-            # Extrair da linha ORIGINAL para preservar decimais
-            nums = extrair_numeros(line, min_val=0.0001)
+            # Prioriza numeros com ponto decimal (0.7095, 1.1580, 3075.00)
+            nums = [float(n) for n in re.findall(r'\d+\.\d+', line)]
+            if not nums:
+                nums = [float(n) for n in re.findall(r'\d+', line) if float(n) > 10]
             if nums:
                 sl = nums[-1]
 
         elif re.search(r'\bTP\b|\bTARGET\b|\bALVO\b', up_keyword):
-            # Extrair da linha ORIGINAL para preservar decimais
-            nums = extrair_numeros(line, min_val=0.0001)
+            # Prioriza numeros com ponto decimal
+            nums = [float(n) for n in re.findall(r'\d+\.\d+', line)]
+            if not nums:
+                nums = [float(n) for n in re.findall(r'\d+', line) if float(n) > 10]
             if nums:
                 tps.append(nums[-1])
 
