@@ -101,6 +101,12 @@ def extrair_numeros(line: str, min_val: float = 0.0001) -> list:
     return [float(n) for n in re.findall(r'\d+(?:\.\d+)?', line) if float(n) > min_val]
 
 def parse_signal(text: str) -> Optional[dict]:
+    # ── Rejeitar sinais com TP em pips (ex: "TP: 50/100Pips") ──────────────
+    # Esses sinais usam pips relativos, não preços absolutos — não são executáveis
+    if re.search(r'\bpips?\b', text, re.IGNORECASE):
+        log.info("Sinal rejeitado — TP em pips (não suportado)")
+        return None
+
     # Normalizar \n literal para quebra de linha real
     text_clean = text.strip().replace('\\n', '\n')
     text_clean = re.sub(r'\s*[|;]\s*', '\n', text_clean)
@@ -143,14 +149,17 @@ def parse_signal(text: str) -> Optional[dict]:
     if m:
         entry = float(m.group(2))
 
-    # Padrão: "X/Y" (Gold Pro Trader)
+    # Padrão: "X/Y" (Gold Pro Trader) — apenas se ambos os valores forem > 100 (preços reais, não pips)
     if not entry:
         for line in lines:
             h = re.sub(r'[^\w\s/\.\-]', ' ', line.upper())
             m = re.search(r'(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)', h)
             if m:
-                entry = float(m.group(2))
-                break
+                v1, v2 = float(m.group(1)), float(m.group(2))
+                # Ignorar se parecem pips (valores pequenos < 500) numa linha sem símbolo conhecido
+                if v1 > 100 and v2 > 100:
+                    entry = v2
+                    break
 
     # Padrão: "@ X"
     if not entry:
