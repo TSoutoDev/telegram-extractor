@@ -191,6 +191,18 @@ def parse_signal(text: str) -> Optional[dict]:
         if m:
             entry = float(m.group(1))
 
+    # "X-Y" na mesma linha que BUY/SELL/símbolo — FX Premiere ("Buy Gold 5261.8-5251.8")
+    if not entry:
+        for line in lines:
+            h = re.sub(r'[^\w\s/\.\-]', ' ', line.upper())
+            if re.search(r'\bBUY\b|\bSELL\b', h) or any(k.upper() in h for k in SYMBOL_MAP):
+                m = re.search(r'(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)', line)
+                if m:
+                    v1, v2 = float(m.group(1)), float(m.group(2))
+                    if v1 > 100 and v2 > 100:
+                        entry = min(v1,v2) if trade_type == "BUY" else max(v1,v2)
+                        break
+
     # Fallback: último número da linha com BUY/SELL/símbolo
     if not entry:
         for line in lines:
@@ -214,7 +226,7 @@ def parse_signal(text: str) -> Optional[dict]:
         line = lines[i]
         up = line.upper()
 
-        if re.search(r'\bSTOP\s*LOSS\b|\bSL\b', up):
+        if re.search(r'\bSTOP\s*LOSS\b|\bSL\b|\bSI\b', up):
             # SL pode estar na mesma linha ou na próxima (Gold Signals.io: "Sl\n5178")
             nums = [float(n) for n in re.findall(r'\d+\.\d+', line)]
             if not nums:
