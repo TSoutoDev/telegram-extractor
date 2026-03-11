@@ -97,16 +97,38 @@ SYMBOL_MAP = {
 }
 
 def extrair_numeros(line: str, min_val: float = 0.0001) -> list:
-    """Extrai números da linha ORIGINAL (sem substituir pontos decimais)."""
     return [float(n) for n in re.findall(r'\d+(?:\.\d+)?', line) if float(n) > min_val]
 
-def parse_signal(text: str) -> Optional[dict]:
-    # ── Rejeitar sinais com TP em pips (ex: "TP: 50/100Pips") ──────────────
-    # Esses sinais usam pips relativos, não preços absolutos — não são executáveis
-    if re.search(r'\bpips?\b', text, re.IGNORECASE):
-        log.info("Sinal rejeitado — TP em pips (não suportado)")
-        return None
+def pip_size(symbol: str) -> float:
+    """1 pip em preço real por símbolo.
+    Para XAUUSD, o grupo Gold Signals.io usa '50 pips' = $50 de movimento,
+    portanto pip_size=1.0 (50 pips × 1.0 = $50 de distância).
+    """
+    mapping = {
+        "XAUUSD": 1.0,   "XAGUSD": 0.1,
+        "EURUSD": 0.0001, "GBPUSD": 0.0001, "AUDUSD": 0.0001,
+        "NZDUSD": 0.0001, "USDCAD": 0.0001, "USDCHF": 0.0001,
+        "USDJPY": 0.01,   "EURJPY": 0.01,   "GBPJPY": 0.01,
+        "AUDJPY": 0.01,   "CADJPY": 0.01,   "CHFJPY": 0.01,
+        "EURGBP": 0.0001, "EURAUD": 0.0001, "EURCAD": 0.0001,
+        "GBPAUD": 0.0001, "GBPCAD": 0.0001, "GBPCHF": 0.0001,
+        "AUDCAD": 0.0001, "AUDNZD": 0.0001, "EURNZD": 0.0001, "GBPNZD": 0.0001,
+        "BTCUSD": 1.0,    "ETHUSD": 0.1,    "LTCUSD": 0.1,    "XRPUSD": 0.0001,
+        "US30": 1.0, "US500": 0.1, "NAS100": 1.0, "GER40": 1.0, "UK100": 1.0,
+        "USOIL": 0.01, "UKOIL": 0.01,
+    }
+    return mapping.get(symbol, 0.0001)
 
+def convert_pips_to_prices(entry: float, pip_targets: list, trade_type: str, symbol: str) -> list:
+    """Converte lista de pips relativos em preços absolutos."""
+    size = pip_size(symbol)
+    result = []
+    for p in pip_targets:
+        price = (entry + p * size) if trade_type == "BUY" else (entry - p * size)
+        result.append(round(price, 2))
+    return result
+
+def parse_signal(text: str) -> Optional[dict]:
     # Normalizar \n literal para quebra de linha real
     text_clean = text.strip().replace('\\n', '\n')
     text_clean = re.sub(r'\s*[|;]\s*', '\n', text_clean)
@@ -115,13 +137,9 @@ def parse_signal(text: str) -> Optional[dict]:
     if not lines:
         return None
 
-    # Limpar emojis e caracteres especiais do header
-    header = re.sub(r'[^\w\s/\.\-]', ' ', lines[0].upper())
-    header = re.sub(r'\s+', ' ', header).strip()
-
-    # Detectar símbolo em todas as linhas
+    # ── Detectar símbolo ──────────────────────────────────────────────────────
     symbol = None
-    for search in [header] + [l.upper() for l in lines[1:]]:
+    for search in [l.upper() for l in lines]:
         for key, val in SYMBOL_MAP.items():
             if key.upper() in search:
                 symbol = val
@@ -131,7 +149,7 @@ def parse_signal(text: str) -> Optional[dict]:
     if not symbol:
         return None
 
-    # Detectar tipo BUY/SELL no texto completo
+    # ── Detectar tipo BUY/SELL ────────────────────────────────────────────────
     full_text_up = text_clean.upper()
     trade_type = None
     if re.search(r'\bBUY\b|\bCOMPRA\b|\bLONG\b', full_text_up):
@@ -141,27 +159,33 @@ def parse_signal(text: str) -> Optional[dict]:
     if not trade_type:
         return None
 
-    # Detectar entry — vários padrões
+    # ── Detectar entry ────────────────────────────────────────────────────────
     entry = None
 
-    # Padrão: "between X till/to/and Y" (Forex GDP)
+    # "between X till/to Y" — Forex GDP
     m = re.search(r'between\s+(\d+(?:\.\d+)?)\s+(?:till|to|and|-)\s+(\d+(?:\.\d+)?)', full_text_up)
     if m:
         entry = float(m.group(2))
 
-    # Padrão: "X/Y" (Gold Pro Trader) — apenas se ambos os valores forem > 100 (preços reais, não pips)
+    # "@ X - Y" ou "@ X / Y" — Gold Signals.io ("Buy Now @ 5097 - 5093")
+    if not entry:
+        m = re.search(r'@\s*(\d+(?:\.\d+)?)\s*[-/]\s*(\d+(?:\.\d+)?)', full_text_up)
+        if m:
+            v1, v2 = float(m.group(1)), float(m.group(2))
+            entry = min(v1, v2) if trade_type == "BUY" else max(v1, v2)
+
+    # "X/Y" — Gold Pro Trader ("#XAUUSD Buy 5180/5175")
     if not entry:
         for line in lines:
             h = re.sub(r'[^\w\s/\.\-]', ' ', line.upper())
             m = re.search(r'(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)', h)
             if m:
                 v1, v2 = float(m.group(1)), float(m.group(2))
-                # Ignorar se parecem pips (valores pequenos < 500) numa linha sem símbolo conhecido
                 if v1 > 100 and v2 > 100:
                     entry = v2
                     break
 
-    # Padrão: "@ X"
+    # "@ X" simples
     if not entry:
         m = re.search(r'@\s*(\d+(?:\.\d+)?)', full_text_up)
         if m:
@@ -180,57 +204,82 @@ def parse_signal(text: str) -> Optional[dict]:
     if not entry:
         return None
 
-    # ── TPs e SL ─────────────────────────────────────────────────────────────
-    # FIX: usar a linha ORIGINAL para extrair números (preserva ponto decimal)
-    # O bug anterior fazia replace('.', ' ') no texto usado para extrair números,
-    # o que quebrava preços como 0.7095 → "0 7095" (inválido para Forex)
-    tps, sl = [], None
+    # ── TPs e SL ──────────────────────────────────────────────────────────────
+    sl = None
+    tps_absolute = []
+    tps_pips = []
 
-    for line in lines:
-        # Usar upper() SEM substituir pontos para detectar palavras-chave
-        up_keyword = line.upper()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        up = line.upper()
 
-        if re.search(r'\bSTOP\s*LOSS\b|\bSL\b', up_keyword):
-            # Prioriza numeros com ponto decimal (0.7095, 1.1580, 3075.00)
+        if re.search(r'\bSTOP\s*LOSS\b|\bSL\b', up):
+            # SL pode estar na mesma linha ou na próxima (Gold Signals.io: "Sl\n5178")
             nums = [float(n) for n in re.findall(r'\d+\.\d+', line)]
             if not nums:
                 nums = [float(n) for n in re.findall(r'\d+', line) if float(n) > 10]
             if nums:
                 sl = nums[-1]
+            elif i + 1 < len(lines):
+                nx = extrair_numeros(lines[i + 1], min_val=1.0)
+                if nx:
+                    sl = nx[-1]
 
-        elif re.search(r'\bTP\b|\bTARGET\b|\bALVO\b', up_keyword):
-            # Prioriza numeros com ponto decimal
-            nums = [float(n) for n in re.findall(r'\d+\.\d+', line)]
-            if not nums:
-                nums = [float(n) for n in re.findall(r'\d+', line) if float(n) > 10]
-            if nums:
-                tps.append(nums[-1])
+        elif re.search(r'\bTP\b|\bTARGET\b|\bALVO\b', up):
+            # Detectar pips: "50/100Pips", "50pips", "50 pips"
+            # Nota: \b não funciona entre dígito e letra, então usamos \d pips?
+            is_pips = bool(re.search(r'\dpips?', up, re.IGNORECASE))
+            if is_pips:
+                # Pegar TODOS os números da linha (50 e 100 de "50/100Pips")
+                all_nums = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', line) if float(n) > 1]
+                tps_pips.extend(all_nums)
+            else:
+                # Preços absolutos: preferir decimais, ou inteiros com 3+ dígitos
+                nums_decimal = [float(n) for n in re.findall(r'\d+\.\d+', line) if float(n) > 0.001]
+                nums_int     = [float(n) for n in re.findall(r'\b(\d{3,})\b', line)]
+                if nums_decimal:
+                    tps_absolute.extend(nums_decimal)
+                elif nums_int:
+                    tps_absolute.extend(nums_int)
 
-    # Fallback — extrair TPs do texto completo
-    if not tps:
+        i += 1
+
+    # Fallback global para TPs
+    if not tps_absolute and not tps_pips:
         tp_matches = re.findall(r'(?:TP\s*\d*|TARGET\s*\d*)[\s.:]*?(\d+(?:\.\d+)?)', full_text_up)
-        tps = [float(v) for v in tp_matches if float(v) > 0.0001]
+        for v in tp_matches:
+            fv = float(v)
+            if '.' in v and fv > 0.001:
+                tps_absolute.append(fv)
+            elif fv >= 100:
+                tps_absolute.append(fv)
 
-    if not tps:
+    # Converter pips → preços absolutos
+    if not tps_absolute and tps_pips:
+        tps_absolute = convert_pips_to_prices(entry, tps_pips, trade_type, symbol)
+        log.info(f"TPs convertidos de pips: {tps_pips} → preços: {tps_absolute}")
+
+    if not tps_absolute:
+        log.info("Sinal rejeitado — nenhum TP válido encontrado")
         return None
 
-    # Limitar a 4 TPs (EA suporta no máximo 4)
-    tps = tps[:4]
-
-    return {
+    parsed = {
         "id":     str(uuid.uuid4()),
         "symbol": symbol,
         "type":   trade_type,
         "entry":  entry,
         "sl":     sl or 0.0,
-        "tps":    tps,
+        "tps":    tps_absolute[:4],
         "source": "Telegram",
         "raw":    text_clean[:300],
         "time":   datetime.now(timezone.utc).isoformat(),
         "status": "pending",
     }
+    log.info(f"PARSE OK | {parsed['symbol']} {parsed['type']} entry={parsed['entry']} sl={parsed['sl']} tps={parsed['tps']}")
+    return parsed
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # WHATSAPP — Evolution API
 # ─────────────────────────────────────────────────────────────────────────────
 async def enviar_whatsapp(mensagem: str):
