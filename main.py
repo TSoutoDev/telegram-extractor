@@ -191,12 +191,13 @@ def parse_signal(text: str) -> Optional[dict]:
         if m:
             entry = float(m.group(1))
 
-    # "X-Y" na mesma linha que BUY/SELL/símbolo — FX Premiere ("Buy Gold 5261.8-5251.8")
+    # "X-Y" ou "X/Y" na mesma linha que BUY/SELL/símbolo
+    # Ex: "Buy Gold 5261.8-5251.8" | "XAUUSD Sell 5191/5194"
     if not entry:
         for line in lines:
             h = re.sub(r'[^\w\s/\.\-]', ' ', line.upper())
             if re.search(r'\bBUY\b|\bSELL\b', h) or any(k.upper() in h for k in SYMBOL_MAP):
-                m = re.search(r'(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)', line)
+                m = re.search(r'(\d+(?:\.\d+)?)\s*[-/]\s*(\d+(?:\.\d+)?)', line)
                 if m:
                     v1, v2 = float(m.group(1)), float(m.group(2))
                     if v1 > 100 and v2 > 100:
@@ -238,7 +239,7 @@ def parse_signal(text: str) -> Optional[dict]:
                 if nx:
                     sl = nx[-1]
 
-        elif re.search(r'\bTP\b|\bTARGET\b|\bALVO\b', up):
+        elif re.search(r'\bTP\d*\b|\d+TP\b|\bTARGET\b|\bALVO\b', up):
             # Detectar pips: "50/100Pips", "50pips", "50 pips"
             # Nota: \b não funciona entre dígito e letra, então usamos \d pips?
             is_pips = bool(re.search(r'\dpips?', up, re.IGNORECASE))
