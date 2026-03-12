@@ -475,12 +475,39 @@ async def health():
     }
 
 @app.get("/signal/pending")
-async def get_pending(authorization: str = Header("")):
+async def get_pending(authorization: str = Header(""), symbol: str = ""):
+    """MT5 consulta sinal pendente a cada 5 segundos.
+    Parâmetro opcional ?symbol=XAUUSD ou ?symbol=FOREX filtra por ativo.
+    Sem parâmetro → retorna o primeiro da fila (comportamento legado).
+    """
     check_token(authorization)
-    if not signal_queue:
+
+    # Famílias de símbolos — EA informa seu "grupo" ou um símbolo específico
+    FAMILIAS = {
+        "XAUUSD": {"XAUUSD", "XAGUSD"},
+        "FOREX":  {"EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","NZDUSD","USDCAD",
+                   "EURJPY","GBPJPY","EURGBP","EURAUD","EURCAD","GBPAUD","GBPCAD",
+                   "GBPCHF","AUDCAD","AUDJPY","CADJPY","CHFJPY","AUDNZD","EURNZD","GBPNZD"},
+        "INDEX":  {"US30","US500","NAS100","GER40","UK100","JP225"},
+        "CRYPTO": {"BTCUSD","ETHUSD","LTCUSD","XRPUSD"},
+        "OIL":    {"USOIL","UKOIL"},
+    }
+
+    if not symbol:
+        # sem filtro → comportamento original (retrocompatível)
+        if not signal_queue:
+            from fastapi.responses import Response
+            return Response(status_code=204)
+        return JSONResponse(status_code=200, content=signal_queue[0])
+
+    sym_upper = symbol.upper()
+    aceitos = FAMILIAS.get(sym_upper, {sym_upper})  # família ou símbolo direto
+
+    sinal = next((s for s in signal_queue if s.get("symbol", "") in aceitos), None)
+    if not sinal:
         from fastapi.responses import Response
         return Response(status_code=204)
-    return JSONResponse(status_code=200, content=signal_queue[0])
+    return JSONResponse(status_code=200, content=sinal)
 
 @app.post("/signal/confirm")
 async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
