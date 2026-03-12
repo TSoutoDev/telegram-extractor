@@ -417,6 +417,8 @@ def fmt_exec(s: dict, status: str, msg: str) -> str:
 def registrar_listener():
     @client.on(events.NewMessage(chats=SIGNAL_GROUPS if SIGNAL_GROUPS else None, incoming=True, outgoing=True))
     async def handler(event):
+         # ADICIONE ESTA LINHA — loga TUDO que chega, antes de qualquer filtro
+        log.info(f"[RAW] chat_id={event.chat_id} | is_channel={event.is_channel} | is_group={event.is_group} | texto={texto[:80]}")
         if not event.is_group and not event.is_channel:
             return
         chat  = await event.get_chat()
