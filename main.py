@@ -30,7 +30,6 @@ EVOLUTION_TOKEN    = os.environ.get("EVOLUTION_TOKEN", "")
 EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 WHATSAPP_NUMBER    = os.environ.get("WHATSAPP_NUMBER", "")
 
-# IDs dos grupos monitorados (negativos, separados por vírgula)
 SIGNAL_GROUPS = [
     int(x.strip())
     for x in os.environ.get("TELEGRAM_SIGNAL_GROUPS", "").split(",")
@@ -42,7 +41,7 @@ signal_queue:   list[dict] = []
 signal_history: list[dict] = []
 
 # ── app ───────────────────────────────────────────────────────────────────────
-app = FastAPI(title="TS Signal Bridge", version="2.1.0")
+app = FastAPI(title="TS Signal Bridge", version="2.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -51,26 +50,97 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── modelo para confirmação do MT5 ───────────────────────────────────────────
 class ConfirmRequest(BaseModel):
     id: str
-    status: str        # executed | failed | ignored
+    status: str
     message: str
     account: Optional[str] = ""
 
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
+# [v2.2] FILTROS ANTI-LIXO
+# =============================================================================
+
+# FILTRO 1 — Rejeitar recaps/resultados (não são sinais de entrada)
+_RECAP_PATTERNS = [
+    r"closed\s+trade",
+    r"total[:\s]+[+\-]?\d+\s*pips",
+    r"\bweekly\s+result",
+    r"\bdaily\s+result",
+    r"\bresult[o]?\s+do\s+dia",
+    r"\btrades?\s+fechad",
+    r"\bprofit\s+today",
+    r"\bperformance\s+update",
+    r"\bscore\s+today",
+    r"tp\s*\d+\s+(?:hit|atingido|alcançado|batido)",
+    r"(?:hit|atingido)\s+tp\s*\d+",
+]
+_RECAP_RE = re.compile("|".join(_RECAP_PATTERNS), re.IGNORECASE)
+
+def _e_recap(text: str) -> bool:
+    return bool(_RECAP_RE.search(text))
+
+# FILTRO 2 — Validar faixa de preço por símbolo
+_PRICE_RANGES = {
+    # Ouro: cotação atual ~$2900-3200, margem ampla até $9999 para diferentes brokers
+    "XAUUSD": (1000.0,  9999.0),
+    "XAGUSD": (10.0,    200.0),
+    "EURUSD": (0.80,    1.60),
+    "GBPUSD": (1.00,    2.00),
+    "AUDUSD": (0.50,    1.20),
+    "NZDUSD": (0.40,    1.10),
+    "USDCAD": (1.00,    1.80),
+    "USDCHF": (0.70,    1.30),
+    "USDJPY": (80.0,    200.0),
+    "EURJPY": (100.0,   200.0),
+    "GBPJPY": (120.0,   230.0),
+    "AUDJPY": (55.0,    130.0),
+    "CADJPY": (70.0,    130.0),
+    "CHFJPY": (100.0,   180.0),
+    "EURGBP": (0.60,    1.00),
+    "EURAUD": (1.30,    2.00),
+    "EURCAD": (1.20,    1.80),
+    "GBPAUD": (1.50,    2.30),
+    "GBPCAD": (1.50,    2.20),
+    "GBPCHF": (1.00,    1.60),
+    "AUDCAD": (0.80,    1.20),
+    "AUDNZD": (0.90,    1.30),
+    "EURNZD": (1.40,    1.90),
+    "GBPNZD": (1.80,    2.40),
+    "BTCUSD": (10000.0, 500000.0),
+    "ETHUSD": (500.0,   30000.0),
+    "LTCUSD": (30.0,    2000.0),
+    "XRPUSD": (0.10,    20.0),
+    "US30":   (20000.0, 60000.0),
+    "US500":  (2000.0,  8000.0),
+    "NAS100": (10000.0, 30000.0),
+    "GER40":  (10000.0, 30000.0),
+    "UK100":  (6000.0,  12000.0),
+    "JP225":  (20000.0, 60000.0),
+    "USOIL":  (20.0,    200.0),
+    "UKOIL":  (20.0,    200.0),
+}
+
+def _preco_valido(symbol: str, price: float) -> bool:
+    if price <= 0:
+        return False
+    if symbol not in _PRICE_RANGES:
+        return True  # símbolo desconhecido — não bloquear
+    mn, mx = _PRICE_RANGES[symbol]
+    return mn <= price <= mx
+
+# FILTRO 3 — Símbolos que exigem SL obrigatório
+_SL_OBRIGATORIO = {"XAUUSD", "BTCUSD", "ETHUSD", "NAS100", "US30"}
+
+# =============================================================================
 # PARSER DE SINAIS
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 SYMBOL_MAP = {
-    # Metais
     "gold": "XAUUSD",   "xauusd": "XAUUSD",
     "silver": "XAGUSD", "xagusd": "XAGUSD",
-    # Forex majors
     "eurusd": "EURUSD", "gbpusd": "GBPUSD",
     "usdjpy": "USDJPY", "usdchf": "USDCHF",
     "audusd": "AUDUSD", "nzdusd": "NZDUSD",
     "usdcad": "USDCAD",
-    # Forex cruzados
     "eurjpy": "EURJPY", "gbpjpy": "GBPJPY",
     "eurgbp": "EURGBP", "euraud": "EURAUD",
     "eurcad": "EURCAD",
@@ -79,19 +149,16 @@ SYMBOL_MAP = {
     "audjpy": "AUDJPY", "cadjpy": "CADJPY",
     "chfjpy": "CHFJPY", "audnzd": "AUDNZD",
     "eurnzd": "EURNZD", "gbpnzd": "GBPNZD",
-    # Índices
     "nas100": "NAS100", "nasdaq": "NAS100",
     "us30": "US30",     "dow": "US30",
     "us500": "US500",   "sp500": "US500",
     "uk100": "UK100",   "ftse": "UK100",
     "ger40": "GER40",   "dax": "GER40",
     "jp225": "JP225",   "nikkei": "JP225",
-    # Cripto
     "btcusd": "BTCUSD", "bitcoin": "BTCUSD",
     "ethusd": "ETHUSD", "ethereum": "ETHUSD",
     "ltcusd": "LTCUSD", "litecoin": "LTCUSD",
     "xrpusd": "XRPUSD", "ripple": "XRPUSD",
-    # Energia
     "usoil": "USOIL",   "wti": "USOIL",
     "ukoil": "UKOIL",   "brent": "UKOIL",
 }
@@ -100,12 +167,8 @@ def extrair_numeros(line: str, min_val: float = 0.0001) -> list:
     return [float(n) for n in re.findall(r'\d+(?:\.\d+)?', line) if float(n) > min_val]
 
 def pip_size(symbol: str) -> float:
-    """1 pip em preço real por símbolo.
-    Para XAUUSD, o grupo Gold Signals.io usa '50 pips' = $50 de movimento,
-    portanto pip_size=1.0 (50 pips × 1.0 = $50 de distância).
-    """
     mapping = {
-        "XAUUSD": 1.0,   "XAGUSD": 0.1,
+        "XAUUSD": 1.0,    "XAGUSD": 0.1,
         "EURUSD": 0.0001, "GBPUSD": 0.0001, "AUDUSD": 0.0001,
         "NZDUSD": 0.0001, "USDCAD": 0.0001, "USDCHF": 0.0001,
         "USDJPY": 0.01,   "EURJPY": 0.01,   "GBPJPY": 0.01,
@@ -120,7 +183,6 @@ def pip_size(symbol: str) -> float:
     return mapping.get(symbol, 0.0001)
 
 def convert_pips_to_prices(entry: float, pip_targets: list, trade_type: str, symbol: str) -> list:
-    """Converte lista de pips relativos em preços absolutos."""
     size = pip_size(symbol)
     result = []
     for p in pip_targets:
@@ -129,12 +191,15 @@ def convert_pips_to_prices(entry: float, pip_targets: list, trade_type: str, sym
     return result
 
 def parse_signal(text: str) -> Optional[dict]:
-    # Normalizar \n literal para quebra de linha real
     text_clean = text.strip().replace('\\n', '\n')
     text_clean = re.sub(r'\s*[|;]\s*', '\n', text_clean)
-
     lines = [l.strip() for l in text_clean.split("\n") if l.strip()]
     if not lines:
+        return None
+
+    # ── [v2.2] Filtro 1: Rejeitar recap/resultado ─────────────────────────────
+    if _e_recap(text_clean):
+        log.info("Rejeitado: mensagem identificada como recap/resultado")
         return None
 
     # ── Detectar símbolo ──────────────────────────────────────────────────────
@@ -159,22 +224,27 @@ def parse_signal(text: str) -> Optional[dict]:
     if not trade_type:
         return None
 
-    # ── Detectar entry ────────────────────────────────────────────────────────
-    entry = None
+    # ── Detectar entry (com range opcional) ──────────────────────────────────
+    entry      = None
+    entry_min  = None   # [v2.3] extremo inferior do range (None se sinal pontual)
+    entry_max  = None   # [v2.3] extremo superior do range (None se sinal pontual)
 
-    # "between X till/to Y" — Forex GDP
+    # "between X till/to Y"
     m = re.search(r'between\s+(\d+(?:\.\d+)?)\s+(?:till|to|and|-)\s+(\d+(?:\.\d+)?)', full_text_up)
     if m:
-        entry = float(m.group(2))
+        v1, v2 = float(m.group(1)), float(m.group(2))
+        entry_min, entry_max = min(v1,v2), max(v1,v2)
+        entry = entry_min if trade_type == "BUY" else entry_max
 
-    # "@ X - Y" ou "@ X / Y" — Gold Signals.io ("Buy Now @ 5097 - 5093")
+    # "@ X - Y" ou "@ X / Y"  ← Gold Signals.io: "@ 5182 - 5186"
     if not entry:
         m = re.search(r'@\s*(\d+(?:\.\d+)?)\s*[-/]\s*(\d+(?:\.\d+)?)', full_text_up)
         if m:
             v1, v2 = float(m.group(1)), float(m.group(2))
-            entry = min(v1, v2) if trade_type == "BUY" else max(v1, v2)
+            entry_min, entry_max = min(v1,v2), max(v1,v2)
+            entry = entry_min if trade_type == "BUY" else entry_max
 
-    # "X/Y" — Gold Pro Trader ("#XAUUSD Buy 5180/5175")
+    # "X/Y" na mesma linha do símbolo  ← Gold Pro Trader: "#XAUUSD Buy 5180/5175"
     if not entry:
         for line in lines:
             h = re.sub(r'[^\w\s/\.\-]', ' ', line.upper())
@@ -182,17 +252,18 @@ def parse_signal(text: str) -> Optional[dict]:
             if m:
                 v1, v2 = float(m.group(1)), float(m.group(2))
                 if v1 > 100 and v2 > 100:
-                    entry = v2
+                    entry_min, entry_max = min(v1,v2), max(v1,v2)
+                    entry = entry_max   # fallback conservador
                     break
 
-    # "@ X" simples
+    # "@ X" simples — sem range
     if not entry:
         m = re.search(r'@\s*(\d+(?:\.\d+)?)', full_text_up)
         if m:
             entry = float(m.group(1))
+            # entry_min/max ficam None → sinal pontual
 
-    # "X-Y" ou "X/Y" na mesma linha que BUY/SELL/símbolo
-    # Ex: "Buy Gold 5261.8-5251.8" | "XAUUSD Sell 5191/5194"
+    # "X-Y" ou "X/Y" na linha do sinal
     if not entry:
         for line in lines:
             h = re.sub(r'[^\w\s/\.\-]', ' ', line.upper())
@@ -201,10 +272,11 @@ def parse_signal(text: str) -> Optional[dict]:
                 if m:
                     v1, v2 = float(m.group(1)), float(m.group(2))
                     if v1 > 100 and v2 > 100:
-                        entry = min(v1,v2) if trade_type == "BUY" else max(v1,v2)
+                        entry_min, entry_max = min(v1,v2), max(v1,v2)
+                        entry = entry_min if trade_type == "BUY" else entry_max
                         break
 
-    # Fallback: último número da linha com BUY/SELL/símbolo
+    # Fallback: último número da linha do sinal
     if not entry:
         for line in lines:
             h = re.sub(r'[^\w\s/\.\-]', ' ', line.upper())
@@ -215,6 +287,11 @@ def parse_signal(text: str) -> Optional[dict]:
                     break
 
     if not entry:
+        return None
+
+    # ── [v2.2] Filtro 2: Validar faixa de preço ──────────────────────────────
+    if not _preco_valido(symbol, entry):
+        log.info(f"Rejeitado: entry={entry} fora da faixa esperada para {symbol}")
         return None
 
     # ── TPs e SL ──────────────────────────────────────────────────────────────
@@ -228,7 +305,6 @@ def parse_signal(text: str) -> Optional[dict]:
         up = line.upper()
 
         if re.search(r'\bSTOP\s*LOSS\b|\bSL\b|\bSI\b', up):
-            # SL pode estar na mesma linha ou na próxima (Gold Signals.io: "Sl\n5178")
             nums = [float(n) for n in re.findall(r'\d+\.\d+', line)]
             if not nums:
                 nums = [float(n) for n in re.findall(r'\d+', line) if float(n) > 10]
@@ -240,15 +316,11 @@ def parse_signal(text: str) -> Optional[dict]:
                     sl = nx[-1]
 
         elif re.search(r'\bTP\d*\b|\d+TP\b|\bTARGET\b|\bALVO\b', up):
-            # Detectar pips: "50/100Pips", "50pips", "50 pips"
-            # Nota: \b não funciona entre dígito e letra, então usamos \d pips?
             is_pips = bool(re.search(r'\dpips?', up, re.IGNORECASE))
             if is_pips:
-                # Pegar TODOS os números da linha (50 e 100 de "50/100Pips")
                 all_nums = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', line) if float(n) > 1]
                 tps_pips.extend(all_nums)
             else:
-                # Preços absolutos: preferir decimais, ou inteiros com 3+ dígitos
                 nums_decimal = [float(n) for n in re.findall(r'\d+\.\d+', line) if float(n) > 0.001]
                 nums_int     = [float(n) for n in re.findall(r'\b(\d{3,})\b', line)]
                 if nums_decimal:
@@ -258,7 +330,6 @@ def parse_signal(text: str) -> Optional[dict]:
 
         i += 1
 
-    # Fallback global para TPs
     if not tps_absolute and not tps_pips:
         tp_matches = re.findall(r'(?:TP\s*\d*|TARGET\s*\d*)[\s.:]*?(\d+(?:\.\d+)?)', full_text_up)
         for v in tp_matches:
@@ -268,7 +339,6 @@ def parse_signal(text: str) -> Optional[dict]:
             elif fv >= 100:
                 tps_absolute.append(fv)
 
-    # Converter pips → preços absolutos
     if not tps_absolute and tps_pips:
         tps_absolute = convert_pips_to_prices(entry, tps_pips, trade_type, symbol)
         log.info(f"TPs convertidos de pips: {tps_pips} → preços: {tps_absolute}")
@@ -277,24 +347,42 @@ def parse_signal(text: str) -> Optional[dict]:
         log.info("Sinal rejeitado — nenhum TP válido encontrado")
         return None
 
+    # ── [v2.2] Filtro 3: TPs inválidos ou iguais ao entry ────────────────────
+    tps_validos = [tp for tp in tps_absolute if _preco_valido(symbol, tp) and tp != entry]
+    if not tps_validos:
+        log.info(f"Rejeitado: todos os TPs inválidos para {symbol}")
+        return None
+
+    # ── [v2.2] Filtro 4: SL obrigatório para ativos de alto risco ────────────
+    if symbol in _SL_OBRIGATORIO and (sl is None or sl == 0.0):
+        log.warning(f"Rejeitado: {symbol} exige SL mas SL={sl}")
+        return None
+
+    # [v2.3] entry_min/entry_max só presentes se sinal tinha range
     parsed = {
         "id":     str(uuid.uuid4()),
         "symbol": symbol,
         "type":   trade_type,
         "entry":  entry,
         "sl":     sl or 0.0,
-        "tps":    tps_absolute[:4],
+        "tps":    tps_validos[:4],
         "source": "Telegram",
         "raw":    text_clean[:300],
         "time":   datetime.now(timezone.utc).isoformat(),
         "status": "pending",
     }
-    log.info(f"PARSE OK | {parsed['symbol']} {parsed['type']} entry={parsed['entry']} sl={parsed['sl']} tps={parsed['tps']}")
+    if entry_min is not None:
+        parsed["entry_min"] = entry_min
+        parsed["entry_max"] = entry_max
+
+    range_str = f" range=[{entry_min}-{entry_max}]" if entry_min else ""
+    log.info(f"PARSE OK | {parsed['symbol']} {parsed['type']} entry={parsed['entry']}{range_str} sl={parsed['sl']} tps={parsed['tps']}")
     return parsed
 
 
+# =============================================================================
 # WHATSAPP — Evolution API
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 async def enviar_whatsapp(mensagem: str):
     if not all([EVOLUTION_URL, EVOLUTION_TOKEN, WHATSAPP_NUMBER, EVOLUTION_INSTANCE]):
         log.warning("WhatsApp não configurado — pulando")
@@ -323,35 +411,30 @@ def fmt_exec(s: dict, status: str, msg: str) -> str:
             f"{s['type']} {s['symbol']} @ {s['entry']}\n{msg}\n"
             f"⏰ {datetime.now().strftime('%H:%M:%S')}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LISTENER DO TELETHON — captura mensagens dos grupos
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
+# LISTENER DO TELETHON
+# =============================================================================
 def registrar_listener():
     @client.on(events.NewMessage(chats=SIGNAL_GROUPS if SIGNAL_GROUPS else None))
     async def handler(event):
         if not event.is_group and not event.is_channel:
             return
-
         chat  = await event.get_chat()
         texto = event.raw_text or ""
         nome  = getattr(chat, "title", str(event.chat_id))
-
         log.info(f"Mensagem recebida | Grupo: {nome} ({event.chat_id}) | Texto: {texto[:80]}")
-
         sinal = parse_signal(texto)
         if not sinal:
-            log.info(f"Mensagem não reconhecida como sinal — ignorada")
+            log.info("Mensagem não reconhecida como sinal — ignorada")
             return
-
         sinal["source"] = nome
         signal_queue.append(sinal)
         log.info(f"✅ Sinal enfileirado: {sinal['id']} | {sinal['type']} {sinal['symbol']} @ {sinal['entry']} | {len(sinal['tps'])} TPs | SL: {sinal['sl']}")
-
         await enviar_whatsapp(fmt_sinal(sinal))
 
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 # STARTUP / SHUTDOWN
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 @app.on_event("startup")
 async def startup():
     try:
@@ -362,7 +445,6 @@ async def startup():
             )
             session_str = client.session.save()
             log.info(f"Conectado ao Telegram | SESSION_STRING={session_str}")
-
         registrar_listener()
         log.info(f"Listener ativo | Grupos monitorados: {SIGNAL_GROUPS or 'TODOS'}")
     except Exception as e:
@@ -374,9 +456,9 @@ async def shutdown():
         await client.disconnect()
         log.info("Telegram desconectado")
 
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 # ENDPOINTS — MT5
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 def check_token(authorization: str):
     if authorization.replace("Bearer ", "").strip() != SECRET_KEY:
         raise HTTPException(status_code=401, detail="Token inválido")
@@ -394,7 +476,6 @@ async def health():
 
 @app.get("/signal/pending")
 async def get_pending(authorization: str = Header("")):
-    """MT5 consulta sinal pendente a cada 5 segundos"""
     check_token(authorization)
     if not signal_queue:
         from fastapi.responses import Response
@@ -403,9 +484,7 @@ async def get_pending(authorization: str = Header("")):
 
 @app.post("/signal/confirm")
 async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
-    """MT5 confirma execução da ordem"""
     check_token(authorization)
-
     sinal = next((s for s in signal_queue if s["id"] == body.id), None)
     if not sinal:
         sinal_hist = next((s for s in signal_history if s["id"] == body.id), None)
@@ -413,14 +492,12 @@ async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
             return {"ok": True, "id": body.id, "status": "already_confirmed"}
         sinal = {"id": body.id, "symbol": "?", "type": "?", "entry": 0,
                  "tps": [], "sl": 0, "source": "MT5"}
-
     if sinal in signal_queue:
         signal_queue.remove(sinal)
     sinal.update({"status": body.status, "mt5_msg": body.message,
                   "account": body.account,
                   "executed": datetime.now(timezone.utc).isoformat()})
     signal_history.append(sinal)
-
     log.info(f"Confirmação MT5: {body.id} | {body.status} | {body.message}")
     await enviar_whatsapp(fmt_exec(sinal, body.status, body.message))
     return {"ok": True, "id": body.id, "status": body.status}
@@ -443,7 +520,6 @@ async def clear_queue(authorization: str = Header("")):
 
 @app.post("/signal/test")
 async def test_signal(request_body: dict, authorization: str = Header("")):
-    """Injeta sinal manualmente para testar o MT5 e WhatsApp"""
     check_token(authorization)
     text = request_body.get("text", "")
     if not text:
@@ -456,9 +532,9 @@ async def test_signal(request_body: dict, authorization: str = Header("")):
     await enviar_whatsapp(fmt_sinal(sinal))
     return {"ok": True, "signal": sinal}
 
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 # ENDPOINTS — utilitários
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 @app.get("/groups")
 async def list_groups(authorization: str = Header("")):
     check_token(authorization)
