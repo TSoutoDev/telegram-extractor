@@ -1,0 +1,33 @@
+# ── Credenciais e configurações locais ──────────────────────────────
+.env
+.env.*
+*.env
+secrets.py
+config_local.py
+
+# Versões com credenciais reais (usar apenas as versões _GIT.mq5)
+*_REAL.mq5
+*_LOCAL.mq5
+
+# ── Python ──────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# ── MetaTrader ──────────────────────────────────────────────────────
+*.ex5
+*.log
+logs/
+
+# ── Sistema ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# ── Railway ─────────────────────────────────────────────────────────
+.railway/
