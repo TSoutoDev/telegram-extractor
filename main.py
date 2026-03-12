@@ -415,7 +415,7 @@ def fmt_exec(s: dict, status: str, msg: str) -> str:
 # LISTENER DO TELETHON
 # =============================================================================
 def registrar_listener():
-    @client.on(events.NewMessage(chats=SIGNAL_GROUPS if SIGNAL_GROUPS else None))
+    @client.on(events.NewMessage(chats=SIGNAL_GROUPS if SIGNAL_GROUPS else None, incoming=True, outgoing=True))
     async def handler(event):
         if not event.is_group and not event.is_channel:
             return
