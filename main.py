@@ -330,6 +330,12 @@ def parse_signal(text: str) -> Optional[dict]:
 
         i += 1
 
+    tp_standalone = re.findall(r'\bTP\s*[:\-]?\s*(\d+(?:\.\d+)?)', full_text_up)
+    for v in tp_standalone:
+        fv = float(v)
+        if fv > 100 and fv not in tps_absolute:
+            tps_absolute.append(fv)
+
     if not tps_absolute and not tps_pips:
         tp_matches = re.findall(r'(?:TP\s*\d*|TARGET\s*\d*)[\s.:]*?(\d+(?:\.\d+)?)', full_text_up)
         for v in tp_matches:
