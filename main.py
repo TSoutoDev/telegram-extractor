@@ -417,16 +417,12 @@ def fmt_exec(s: dict, status: str, msg: str) -> str:
 def registrar_listener():
     @client.on(events.NewMessage(chats=SIGNAL_GROUPS if SIGNAL_GROUPS else None, incoming=True, outgoing=True))
     async def handler(event):
-    chat  = await event.get_chat()
-    texto = event.raw_text or ""
-    nome  = getattr(chat, "title", str(event.chat_id))
-    log.info(f"Mensagem recebida | Grupo: {nome} ({event.chat_id}) | Texto: {texto[:80]}")
-    if not event.is_group and not event.is_channel:
-        return
         chat  = await event.get_chat()
         texto = event.raw_text or ""
         nome  = getattr(chat, "title", str(event.chat_id))
         log.info(f"Mensagem recebida | Grupo: {nome} ({event.chat_id}) | Texto: {texto[:80]}")
+        if not event.is_group and not event.is_channel:
+            return
         sinal = parse_signal(texto)
         if not sinal:
             log.info("Mensagem não reconhecida como sinal — ignorada")
