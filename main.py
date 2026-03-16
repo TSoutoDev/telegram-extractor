@@ -279,11 +279,14 @@ def parse_signal(text: str) -> Optional[dict]:
     #   "pivot level 1.0850"                           → 1.0850
     # ─────────────────────────────────────────────────────────────────────────
     if not entry:
-        m = re.search(
+      m = re.search(
             r'(?:'
-            r'TRADING\s+ON'              # "trading on X"
-            r'|PRICE\s+IS(?:\s+AT)?'    # "price is X" / "price is at X"
-            r'|PIVOT\s+LEVEL\s+'         # "pivot level X"
+            r'TRADING\s+ON'
+            r'|PRICE\s+IS(?:\s+AT)?'
+            r'|PIVOT\s+LEVEL\s+'
+            r'|TESTS?\s+(?:AN?\s+)?(?:IMPORTANT\s+)?(?:PSYCHOLOGICAL\s+)?LEVEL'
+            r'|INSTRUMENT\s+TESTS?'
+            r'|BIAS\s*[:\-]\s*(?:BULLISH|BEARISH).*?(\d+(?:\.\d+)?)'
             r')\s*(\d+(?:\.\d+)?)',
             full_text_up
         )
@@ -341,7 +344,7 @@ def parse_signal(text: str) -> Optional[dict]:
         line = lines[i]
         up = line.upper()
 
-        if re.search(r'\bSTOP\s*LOSS\b|\bSL\b|\bSI\b|\bRECOMMENDED\s+STOP\s+LOSS\b', up):
+        if re.search(r'\bSTOP\s*LOSS\b|\bSL\b|\bSI\b|\bRECOMMENDED\s+STOP\s+LOSS\b|\bMY\s+STOP\s+LOSS\b|\bSTOP\s*[:\-]\b', up):
             nums = [float(n) for n in re.findall(r'\d+\.\d+', line)]
             if not nums:
                 nums = [float(n) for n in re.findall(r'\d+', line) if float(n) > 10]
@@ -352,7 +355,7 @@ def parse_signal(text: str) -> Optional[dict]:
                 if nx:
                     sl = nx[-1]
 
-        elif re.search(r'\bTP\d*\b|\d+TP\b|\bTARGET\b|\bALVO\b|\bTAKE\s*PROFIT\b', up):
+       elif re.search(r'\bTP\d*\b|\d+TP\b|\bTARGET\b|\bALVO\b|\bTAKE\s*PROFIT\b|\bTARGET\s*[:\-]', up):
             is_pips = bool(re.search(r'\dpips?', up, re.IGNORECASE))
             if is_pips:
                 all_nums = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', line) if float(n) > 1]
