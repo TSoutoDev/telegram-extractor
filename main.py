@@ -41,7 +41,7 @@ signal_queue:   list[dict] = []
 signal_history: list[dict] = []
 
 # ── app ───────────────────────────────────────────────────────────────────────
-app = FastAPI(title="TS Signal Bridge", version="2.2.0")
+app = FastAPI(title="TS Signal Bridge", version="2.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -128,7 +128,10 @@ def _preco_valido(symbol: str, price: float) -> bool:
     mn, mx = _PRICE_RANGES[symbol]
     return mn <= price <= mx
 
-# FILTRO 3 — Símbolos que exigem SL obrigatório
+# FILTRO 3 — SL obrigatório para TODOS os símbolos
+# True  → rejeita qualquer sinal que não tenha SL (mais seguro)
+# False → só rejeita os ativos voláteis da lista abaixo
+SL_OBRIGATORIO_TODOS = True
 _SL_OBRIGATORIO = {"XAUUSD", "BTCUSD", "ETHUSD", "NAS100", "US30"}
 
 # =============================================================================
@@ -263,7 +266,41 @@ def parse_signal(text: str) -> Optional[dict]:
             entry = float(m.group(1))
             # entry_min/max ficam None → sinal pontual
 
-    # "X-Y" ou "X/Y" na linha do sinal
+    # ─────────────────────────────────────────────────────────────────────────
+    # [v2.3] PASSO 4.5 — Entry embutida em frase de análise (padrão descritivo)
+    #
+    # Cobre sinais onde não há "Entry:" nem "@ X", mas o preço está descrito
+    # em linguagem natural. Só dispara se todos os passos anteriores falharam.
+    #
+    # Exemplos cobertos:
+    #   "The market is trading on 662.40 pivot level"  → 662.40
+    #   "price is at 1.3725"                           → 1.3725
+    #   "price is 1.3725"                              → 1.3725
+    #   "pivot level 1.0850"                           → 1.0850
+    # ─────────────────────────────────────────────────────────────────────────
+    if not entry:
+        m = re.search(
+            r'(?:'
+            r'TRADING\s+ON'              # "trading on X"
+            r'|PRICE\s+IS(?:\s+AT)?'    # "price is X" / "price is at X"
+            r'|PIVOT\s+LEVEL\s+'         # "pivot level X"
+            r')\s*(\d+(?:\.\d+)?)',
+            full_text_up
+        )
+        if m:
+            entry = float(m.group(1))
+            log.info(f"[v2.3] Entry via padrão descritivo: {entry} | match: '{m.group(0).strip()}'")
+
+    # PASSO 5 — "Entry: X" ou "Entry - X" com label explícito
+    # Cobre sinais onde a entry vem em linha dedicada sem BUY/SELL/símbolo.
+    # Ex: "Entry: 1.3725" / "Entry - 2985.50"
+    if not entry:
+        m = re.search(r'\bENTRY\s*[:\-]\s*(\d+(?:\.\d+)?)', full_text_up)
+        if m:
+            entry = float(m.group(1))
+            log.info(f"[v2.3] Entry via label 'Entry:': {entry}")
+
+    # PASSO 6 — "X-Y" ou "X/Y" na linha do sinal
     if not entry:
         for line in lines:
             h = re.sub(r'[^\w\s/\.\-]', ' ', line.upper())
@@ -276,7 +313,7 @@ def parse_signal(text: str) -> Optional[dict]:
                         entry = entry_min if trade_type == "BUY" else entry_max
                         break
 
-    # Fallback: último número da linha do sinal
+    # PASSO 7 — Fallback: último número da linha do sinal
     if not entry:
         for line in lines:
             h = re.sub(r'[^\w\s/\.\-]', ' ', line.upper())
@@ -304,7 +341,7 @@ def parse_signal(text: str) -> Optional[dict]:
         line = lines[i]
         up = line.upper()
 
-        if re.search(r'\bSTOP\s*LOSS\b|\bSL\b|\bSI\b', up):
+        if re.search(r'\bSTOP\s*LOSS\b|\bSL\b|\bSI\b|\bRECOMMENDED\s+STOP\s+LOSS\b', up):
             nums = [float(n) for n in re.findall(r'\d+\.\d+', line)]
             if not nums:
                 nums = [float(n) for n in re.findall(r'\d+', line) if float(n) > 10]
@@ -315,7 +352,7 @@ def parse_signal(text: str) -> Optional[dict]:
                 if nx:
                     sl = nx[-1]
 
-        elif re.search(r'\bTP\d*\b|\d+TP\b|\bTARGET\b|\bALVO\b', up):
+        elif re.search(r'\bTP\d*\b|\d+TP\b|\bTARGET\b|\bALVO\b|\bTAKE\s*PROFIT\b', up):
             is_pips = bool(re.search(r'\dpips?', up, re.IGNORECASE))
             if is_pips:
                 all_nums = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', line) if float(n) > 1]
@@ -359,10 +396,33 @@ def parse_signal(text: str) -> Optional[dict]:
         log.info(f"Rejeitado: todos os TPs inválidos para {symbol}")
         return None
 
-    # ── [v2.2] Filtro 4: SL obrigatório para ativos de alto risco ────────────
-    if symbol in _SL_OBRIGATORIO and (sl is None or sl == 0.0):
-        log.warning(f"Rejeitado: {symbol} exige SL mas SL={sl}")
+    # ── [v2.3] Filtro 3b: Validação de direção TP/SL ─────────────────────────
+    # BUY  → TPs devem estar ACIMA da entry, SL deve estar ABAIXO
+    # SELL → TPs devem estar ABAIXO da entry, SL deve estar ACIMA
+    #
+    # TPs no lado errado são removidos silenciosamente (ruído de parse).
+    # Se todos os TPs forem removidos, o sinal é rejeitado.
+    # SL no lado errado é zerado — melhor abrir sem SL do que com SL invertido.
+    if trade_type == "BUY":
+        tps_validos = [tp for tp in tps_validos if tp > entry]
+        if sl and sl >= entry:
+            log.warning(f"[v2.3] SL {sl} >= entry {entry} em BUY — SL removido")
+            sl = None
+    else:  # SELL
+        tps_validos = [tp for tp in tps_validos if tp < entry]
+        if sl and sl <= entry:
+            log.warning(f"[v2.3] SL {sl} <= entry {entry} em SELL — SL removido")
+            sl = None
+
+    if not tps_validos:
+        log.info(f"Rejeitado: nenhum TP no lado correto da entry para {trade_type} {symbol} @ {entry}")
         return None
+
+    # SL obrigatório — rejeita se SL ausente ou foi invalidado pela direção
+    if SL_OBRIGATORIO_TODOS or symbol in _SL_OBRIGATORIO:
+        if not sl:
+            log.warning(f"Rejeitado: SL ausente para {symbol} (SL_OBRIGATORIO_TODOS={SL_OBRIGATORIO_TODOS})")
+            return None
 
     # [v2.3] entry_min/entry_max só presentes se sinal tinha range
     parsed = {
