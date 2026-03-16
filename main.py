@@ -41,7 +41,7 @@ signal_queue:   list[dict] = []
 signal_history: list[dict] = []
 
 # ── app ───────────────────────────────────────────────────────────────────────
-app = FastAPI(title="TS Signal Bridge", version="2.3.0")
+app = FastAPI(title="TS Signal Bridge", version="2.3.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -60,7 +60,6 @@ class ConfirmRequest(BaseModel):
 # [v2.2] FILTROS ANTI-LIXO
 # =============================================================================
 
-# FILTRO 1 — Rejeitar recaps/resultados (não são sinais de entrada)
 _RECAP_PATTERNS = [
     r"closed\s+trade",
     r"total[:\s]+[+\-]?\d+\s*pips",
@@ -79,9 +78,7 @@ _RECAP_RE = re.compile("|".join(_RECAP_PATTERNS), re.IGNORECASE)
 def _e_recap(text: str) -> bool:
     return bool(_RECAP_RE.search(text))
 
-# FILTRO 2 — Validar faixa de preço por símbolo
 _PRICE_RANGES = {
-    # Ouro: cotação atual ~$2900-3200, margem ampla até $9999 para diferentes brokers
     "XAUUSD": (1000.0,  9999.0),
     "XAGUSD": (10.0,    200.0),
     "EURUSD": (0.80,    1.60),
@@ -124,13 +121,10 @@ def _preco_valido(symbol: str, price: float) -> bool:
     if price <= 0:
         return False
     if symbol not in _PRICE_RANGES:
-        return True  # símbolo desconhecido — não bloquear
+        return True
     mn, mx = _PRICE_RANGES[symbol]
     return mn <= price <= mx
 
-# FILTRO 3 — SL obrigatório para TODOS os símbolos
-# True  → rejeita qualquer sinal que não tenha SL (mais seguro)
-# False → só rejeita os ativos voláteis da lista abaixo
 SL_OBRIGATORIO_TODOS = True
 _SL_OBRIGATORIO = {"XAUUSD", "BTCUSD", "ETHUSD", "NAS100", "US30"}
 
@@ -200,7 +194,6 @@ def parse_signal(text: str) -> Optional[dict]:
     if not lines:
         return None
 
-    # ── [v2.2] Filtro 1: Rejeitar recap/resultado ─────────────────────────────
     if _e_recap(text_clean):
         log.info("Rejeitado: mensagem identificada como recap/resultado")
         return None
@@ -227,10 +220,10 @@ def parse_signal(text: str) -> Optional[dict]:
     if not trade_type:
         return None
 
-    # ── Detectar entry (com range opcional) ──────────────────────────────────
+    # ── Detectar entry ────────────────────────────────────────────────────────
     entry      = None
-    entry_min  = None   # [v2.3] extremo inferior do range (None se sinal pontual)
-    entry_max  = None   # [v2.3] extremo superior do range (None se sinal pontual)
+    entry_min  = None
+    entry_max  = None
 
     # "between X till/to Y"
     m = re.search(r'between\s+(\d+(?:\.\d+)?)\s+(?:till|to|and|-)\s+(\d+(?:\.\d+)?)', full_text_up)
@@ -239,7 +232,7 @@ def parse_signal(text: str) -> Optional[dict]:
         entry_min, entry_max = min(v1,v2), max(v1,v2)
         entry = entry_min if trade_type == "BUY" else entry_max
 
-    # "@ X - Y" ou "@ X / Y"  ← Gold Signals.io: "@ 5182 - 5186"
+    # "@ X - Y" ou "@ X / Y"
     if not entry:
         m = re.search(r'@\s*(\d+(?:\.\d+)?)\s*[-/]\s*(\d+(?:\.\d+)?)', full_text_up)
         if m:
@@ -247,7 +240,7 @@ def parse_signal(text: str) -> Optional[dict]:
             entry_min, entry_max = min(v1,v2), max(v1,v2)
             entry = entry_min if trade_type == "BUY" else entry_max
 
-    # "X/Y" na mesma linha do símbolo  ← Gold Pro Trader: "#XAUUSD Buy 5180/5175"
+    # "X/Y" na mesma linha do símbolo
     if not entry:
         for line in lines:
             h = re.sub(r'[^\w\s/\.\-]', ' ', line.upper())
@@ -256,37 +249,29 @@ def parse_signal(text: str) -> Optional[dict]:
                 v1, v2 = float(m.group(1)), float(m.group(2))
                 if v1 > 100 and v2 > 100:
                     entry_min, entry_max = min(v1,v2), max(v1,v2)
-                    entry = entry_max   # fallback conservador
+                    entry = entry_max
                     break
 
-    # "@ X" simples — sem range
+    # "@ X" simples
     if not entry:
         m = re.search(r'@\s*(\d+(?:\.\d+)?)', full_text_up)
         if m:
             entry = float(m.group(1))
-            # entry_min/max ficam None → sinal pontual
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # [v2.3] PASSO 4.5 — Entry embutida em frase de análise (padrão descritivo)
-    #
-    # Cobre sinais onde não há "Entry:" nem "@ X", mas o preço está descrito
-    # em linguagem natural. Só dispara se todos os passos anteriores falharam.
-    #
+    # [v2.3] Entry via padrão descritivo — inclui formatos do AnabelSignals
     # Exemplos cobertos:
-    #   "The market is trading on 662.40 pivot level"  → 662.40
-    #   "price is at 1.3725"                           → 1.3725
-    #   "price is 1.3725"                              → 1.3725
-    #   "pivot level 1.0850"                           → 1.0850
-    # ─────────────────────────────────────────────────────────────────────────
+    #   "The instrument tests an important psychological level\n158.87"
+    #   "trading on 211.45"
+    #   "price is at 1.3725"
+    #   "pivot level 1.0850"
     if not entry:
-      m = re.search(
+        m = re.search(
             r'(?:'
             r'TRADING\s+ON'
             r'|PRICE\s+IS(?:\s+AT)?'
             r'|PIVOT\s+LEVEL\s+'
             r'|TESTS?\s+(?:AN?\s+)?(?:IMPORTANT\s+)?(?:PSYCHOLOGICAL\s+)?LEVEL'
             r'|INSTRUMENT\s+TESTS?'
-            r'|BIAS\s*[:\-]\s*(?:BULLISH|BEARISH).*?(\d+(?:\.\d+)?)'
             r')\s*(\d+(?:\.\d+)?)',
             full_text_up
         )
@@ -294,9 +279,33 @@ def parse_signal(text: str) -> Optional[dict]:
             entry = float(m.group(1))
             log.info(f"[v2.3] Entry via padrão descritivo: {entry} | match: '{m.group(0).strip()}'")
 
-    # PASSO 5 — "Entry: X" ou "Entry - X" com label explícito
-    # Cobre sinais onde a entry vem em linha dedicada sem BUY/SELL/símbolo.
-    # Ex: "Entry: 1.3725" / "Entry - 2985.50"
+    # [v2.3.1] Entry em linha isolada após padrão descritivo (AnabelSignals)
+    # Ex: "...psychological level\n158.87\nBias - Bullish"
+    if not entry:
+        for idx, line in enumerate(lines):
+            up_line = line.upper()
+            if re.search(
+                r'TESTS?\s+(?:AN?\s+)?(?:IMPORTANT\s+)?(?:PSYCHOLOGICAL\s+)?LEVEL'
+                r'|INSTRUMENT\s+TESTS?'
+                r'|TRADING\s+ON'
+                r'|PIVOT\s+LEVEL',
+                up_line
+            ):
+                # Próxima linha pode ser o preço isolado
+                for next_line in lines[idx:idx+3]:
+                    nums = re.findall(r'\d+(?:\.\d+)?', next_line)
+                    for n in nums:
+                        candidate = float(n)
+                        if _preco_valido(symbol, candidate):
+                            entry = candidate
+                            log.info(f"[v2.3.1] Entry em linha pós-descritivo: {entry}")
+                            break
+                    if entry:
+                        break
+            if entry:
+                break
+
+    # PASSO 5 — "Entry: X" ou "Entry - X"
     if not entry:
         m = re.search(r'\bENTRY\s*[:\-]\s*(\d+(?:\.\d+)?)', full_text_up)
         if m:
@@ -329,7 +338,6 @@ def parse_signal(text: str) -> Optional[dict]:
     if not entry:
         return None
 
-    # ── [v2.2] Filtro 2: Validar faixa de preço ──────────────────────────────
     if not _preco_valido(symbol, entry):
         log.info(f"Rejeitado: entry={entry} fora da faixa esperada para {symbol}")
         return None
@@ -344,7 +352,16 @@ def parse_signal(text: str) -> Optional[dict]:
         line = lines[i]
         up = line.upper()
 
-        if re.search(r'\bSTOP\s*LOSS\b|\bSL\b|\bSI\b|\bRECOMMENDED\s+STOP\s+LOSS\b|\bMY\s+STOP\s+LOSS\b|\bSTOP\s*[:\-]\b', up):
+        # [v2.3.1] SL — adicionado MY STOP LOSS e STOP: / STOP -
+        if re.search(
+            r'\bSTOP\s*LOSS\b'
+            r'|\bSL\b'
+            r'|\bSI\b'
+            r'|\bRECOMMENDED\s+STOP\s+LOSS\b'
+            r'|\bMY\s+STOP\s+LOSS\b'
+            r'|\bSTOP\s*[:\-]',
+            up
+        ):
             nums = [float(n) for n in re.findall(r'\d+\.\d+', line)]
             if not nums:
                 nums = [float(n) for n in re.findall(r'\d+', line) if float(n) > 10]
@@ -355,7 +372,16 @@ def parse_signal(text: str) -> Optional[dict]:
                 if nx:
                     sl = nx[-1]
 
-       elif re.search(r'\bTP\d*\b|\d+TP\b|\bTARGET\b|\bALVO\b|\bTAKE\s*PROFIT\b|\bTARGET\s*[:\-]', up):
+        # [v2.3.1] TP — adicionado TARGET: / TARGET -
+        elif re.search(
+            r'\bTP\d*\b'
+            r'|\d+TP\b'
+            r'|\bTARGET\b'
+            r'|\bALVO\b'
+            r'|\bTAKE\s*PROFIT\b'
+            r'|\bTARGET\s*[:\-]',
+            up
+        ):
             is_pips = bool(re.search(r'\dpips?', up, re.IGNORECASE))
             if is_pips:
                 all_nums = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', line) if float(n) > 1]
@@ -393,25 +419,17 @@ def parse_signal(text: str) -> Optional[dict]:
         log.info("Sinal rejeitado — nenhum TP válido encontrado")
         return None
 
-    # ── [v2.2] Filtro 3: TPs inválidos ou iguais ao entry ────────────────────
     tps_validos = [tp for tp in tps_absolute if _preco_valido(symbol, tp) and tp != entry]
     if not tps_validos:
         log.info(f"Rejeitado: todos os TPs inválidos para {symbol}")
         return None
 
-    # ── [v2.3] Filtro 3b: Validação de direção TP/SL ─────────────────────────
-    # BUY  → TPs devem estar ACIMA da entry, SL deve estar ABAIXO
-    # SELL → TPs devem estar ABAIXO da entry, SL deve estar ACIMA
-    #
-    # TPs no lado errado são removidos silenciosamente (ruído de parse).
-    # Se todos os TPs forem removidos, o sinal é rejeitado.
-    # SL no lado errado é zerado — melhor abrir sem SL do que com SL invertido.
     if trade_type == "BUY":
         tps_validos = [tp for tp in tps_validos if tp > entry]
         if sl and sl >= entry:
             log.warning(f"[v2.3] SL {sl} >= entry {entry} em BUY — SL removido")
             sl = None
-    else:  # SELL
+    else:
         tps_validos = [tp for tp in tps_validos if tp < entry]
         if sl and sl <= entry:
             log.warning(f"[v2.3] SL {sl} <= entry {entry} em SELL — SL removido")
@@ -421,13 +439,11 @@ def parse_signal(text: str) -> Optional[dict]:
         log.info(f"Rejeitado: nenhum TP no lado correto da entry para {trade_type} {symbol} @ {entry}")
         return None
 
-    # SL obrigatório — rejeita se SL ausente ou foi invalidado pela direção
     if SL_OBRIGATORIO_TODOS or symbol in _SL_OBRIGATORIO:
         if not sl:
             log.warning(f"Rejeitado: SL ausente para {symbol} (SL_OBRIGATORIO_TODOS={SL_OBRIGATORIO_TODOS})")
             return None
 
-    # [v2.3] entry_min/entry_max só presentes se sinal tinha range
     parsed = {
         "id":     str(uuid.uuid4()),
         "symbol": symbol,
@@ -545,13 +561,8 @@ async def health():
 
 @app.get("/signal/pending")
 async def get_pending(authorization: str = Header(""), symbol: str = ""):
-    """MT5 consulta sinal pendente a cada 5 segundos.
-    Parâmetro opcional ?symbol=XAUUSD ou ?symbol=FOREX filtra por ativo.
-    Sem parâmetro → retorna o primeiro da fila (comportamento legado).
-    """
     check_token(authorization)
 
-    # Famílias de símbolos — EA informa seu "grupo" ou um símbolo específico
     FAMILIAS = {
         "XAUUSD": {"XAUUSD", "XAGUSD"},
         "FOREX":  {"EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","NZDUSD","USDCAD",
@@ -563,14 +574,13 @@ async def get_pending(authorization: str = Header(""), symbol: str = ""):
     }
 
     if not symbol:
-        # sem filtro → comportamento original (retrocompatível)
         if not signal_queue:
             from fastapi.responses import Response
             return Response(status_code=204)
         return JSONResponse(status_code=200, content=signal_queue[0])
 
     sym_upper = symbol.upper()
-    aceitos = FAMILIAS.get(sym_upper, {sym_upper})  # família ou símbolo direto
+    aceitos = FAMILIAS.get(sym_upper, {sym_upper})
 
     sinal = next((s for s in signal_queue if s.get("symbol", "") in aceitos), None)
     if not sinal:
@@ -628,9 +638,6 @@ async def test_signal(request_body: dict, authorization: str = Header("")):
     await enviar_whatsapp(fmt_sinal(sinal))
     return {"ok": True, "signal": sinal}
 
-# =============================================================================
-# ENDPOINTS — utilitários
-# =============================================================================
 @app.get("/groups")
 async def list_groups(authorization: str = Header("")):
     check_token(authorization)
