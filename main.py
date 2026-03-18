@@ -133,6 +133,9 @@ _SL_OBRIGATORIO = {"XAUUSD", "BTCUSD", "ETHUSD", "NAS100", "US30"}
 # =============================================================================
 SYMBOL_MAP = {
     "gold": "XAUUSD",   "xauusd": "XAUUSD",
+    # ↓ Adicionar estas linhas para XM
+    "goldm": "XAUUSD",  "goldm#": "XAUUSD",
+    "xauusd.": "XAUUSD", "gold.": "XAUUSD",
     "silver": "XAGUSD", "xagusd": "XAGUSD",
     "eurusd": "EURUSD", "gbpusd": "GBPUSD",
     "usdjpy": "USDJPY", "usdchf": "USDCHF",
