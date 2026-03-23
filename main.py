@@ -41,7 +41,7 @@ signal_queue:   list[dict] = []
 signal_history: list[dict] = []
 
 # ── app ───────────────────────────────────────────────────────────────────────
-app = FastAPI(title="TS Signal Bridge", version="2.3.1")
+app = FastAPI(title="TS Signal Bridge", version="2.4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -55,6 +55,13 @@ class ConfirmRequest(BaseModel):
     status: str
     message: str
     account: Optional[str] = ""
+
+# =============================================================================
+# [v2.4] FILTRO FINAL DE SEMANA
+# =============================================================================
+def e_final_de_semana() -> bool:
+    """Retorna True se for sábado (5) ou domingo (6) em UTC."""
+    return datetime.now(timezone.utc).weekday() >= 5
 
 # =============================================================================
 # [v2.2] FILTROS ANTI-LIXO
@@ -262,11 +269,6 @@ def parse_signal(text: str) -> Optional[dict]:
             entry = float(m.group(1))
 
     # [v2.3] Entry via padrão descritivo — inclui formatos do AnabelSignals
-    # Exemplos cobertos:
-    #   "The instrument tests an important psychological level\n158.87"
-    #   "trading on 211.45"
-    #   "price is at 1.3725"
-    #   "pivot level 1.0850"
     if not entry:
         m = re.search(
             r'(?:'
@@ -283,7 +285,6 @@ def parse_signal(text: str) -> Optional[dict]:
             log.info(f"[v2.3] Entry via padrão descritivo: {entry} | match: '{m.group(0).strip()}'")
 
     # [v2.3.1] Entry em linha isolada após padrão descritivo (AnabelSignals)
-    # Ex: "...psychological level\n158.87\nBias - Bullish"
     if not entry:
         for idx, line in enumerate(lines):
             up_line = line.upper()
@@ -294,7 +295,6 @@ def parse_signal(text: str) -> Optional[dict]:
                 r'|PIVOT\s+LEVEL',
                 up_line
             ):
-                # Próxima linha pode ser o preço isolado
                 for next_line in lines[idx:idx+3]:
                     nums = re.findall(r'\d+(?:\.\d+)?', next_line)
                     for n in nums:
@@ -505,6 +505,12 @@ def fmt_exec(s: dict, status: str, msg: str) -> str:
 def registrar_listener():
     @client.on(events.NewMessage(chats=SIGNAL_GROUPS if SIGNAL_GROUPS else None, incoming=True, outgoing=True))
     async def handler(event):
+        # [v2.4] FILTRO FINAL DE SEMANA ───────────────────────────────────────
+        if e_final_de_semana():
+            log.debug("Final de semana — mensagem ignorada")
+            return
+        # ─────────────────────────────────────────────────────────────────────
+
         chat  = await event.get_chat()
         texto = event.raw_text or ""
         nome  = getattr(chat, "title", str(event.chat_id))
@@ -594,21 +600,30 @@ async def get_pending(authorization: str = Header(""), symbol: str = ""):
 @app.post("/signal/confirm")
 async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
     check_token(authorization)
+
     sinal = next((s for s in signal_queue if s["id"] == body.id), None)
     if not sinal:
         sinal_hist = next((s for s in signal_history if s["id"] == body.id), None)
         if sinal_hist:
             return {"ok": True, "id": body.id, "status": "already_confirmed"}
+        # ID desconhecido — aceita mesmo assim (robô pode ter reiniciado)
         sinal = {"id": body.id, "symbol": "?", "type": "?", "entry": 0,
                  "tps": [], "sl": 0, "source": "MT5"}
+
+    # [v2.4] Remove da fila independente do status (executed, ignored, failed)
     if sinal in signal_queue:
         signal_queue.remove(sinal)
+
     sinal.update({"status": body.status, "mt5_msg": body.message,
                   "account": body.account,
                   "executed": datetime.now(timezone.utc).isoformat()})
     signal_history.append(sinal)
     log.info(f"Confirmação MT5: {body.id} | {body.status} | {body.message}")
-    await enviar_whatsapp(fmt_exec(sinal, body.status, body.message))
+
+    # [v2.4] Notifica WhatsApp apenas para executed (evita spam de ignored/failed)
+    if body.status == "executed":
+        await enviar_whatsapp(fmt_exec(sinal, body.status, body.message))
+
     return {"ok": True, "id": body.id, "status": body.status}
 
 @app.get("/signals/queue")
