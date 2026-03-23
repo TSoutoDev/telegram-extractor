@@ -3,11 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.tl.functions.channels import GetParticipantsRequest
-from telethon.tl.types import ChannelParticipantsSearch
 from pydantic import BaseModel
 from typing import Optional
-import os, re, uuid, logging, httpx
+import os, re, uuid, logging
 from datetime import datetime, timezone
 
 # ── logging ───────────────────────────────────────────────────────────────────
@@ -15,22 +13,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 # ── variáveis de ambiente ─────────────────────────────────────────────────────
-API_ID     = os.environ["API_ID"]
-API_HASH   = os.environ["API_HASH"]
-PHONE      = os.environ["PHONE"]
+API_ID = os.environ["API_ID"]
+API_HASH = os.environ["API_HASH"]
+PHONE = os.environ["PHONE"]
 SECRET_KEY = os.environ.get("API_KEY", "chave-secreta")
 
 # ── Telethon com StringSession ────────────────────────────────────────────────
 session_string = os.environ.get("SESSION_STRING", "")
 client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
-
-# ── configurações WhatsApp Cloud API ─────────────────────────────────────────
-WHATSAPP_TOKEN           = os.environ.get("WHATSAPP_TOKEN", "")
-WHATSAPP_PHONE_NUMBER_ID = os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "")
-WHATSAPP_TO              = os.environ.get("WHATSAPP_TO", "")
-WHATSAPP_TEMPLATE_EXEC   = os.environ.get("WHATSAPP_TEMPLATE_EXEC", "trade_execution_alert")
-WHATSAPP_TEMPLATE_LANG   = os.environ.get("WHATSAPP_TEMPLATE_LANG", "pt_BR")
-WHATSAPP_GRAPH_VERSION   = os.environ.get("WHATSAPP_GRAPH_VERSION", "v23.0")
 
 SIGNAL_GROUPS = [
     int(x.strip())
@@ -43,7 +33,7 @@ signal_queue: list[dict] = []
 signal_history: list[dict] = []
 
 # ── app ───────────────────────────────────────────────────────────────────────
-app = FastAPI(title="TS Signal Bridge", version="2.5.0")
+app = FastAPI(title="TS Signal Bridge", version="2.6.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -59,14 +49,13 @@ class ConfirmRequest(BaseModel):
     account: Optional[str] = ""
 
 # =============================================================================
-# [v2.4] FILTRO FINAL DE SEMANA
+# FILTRO FINAL DE SEMANA
 # =============================================================================
 def e_final_de_semana() -> bool:
-    """Retorna True se for sábado (5) ou domingo (6) em UTC."""
     return datetime.now(timezone.utc).weekday() >= 5
 
 # =============================================================================
-# [v2.2] FILTROS ANTI-LIXO
+# FILTROS ANTI-LIXO
 # =============================================================================
 _RECAP_PATTERNS = [
     r"closed\s+trade",
@@ -87,42 +76,42 @@ def _e_recap(text: str) -> bool:
     return bool(_RECAP_RE.search(text))
 
 _PRICE_RANGES = {
-    "XAUUSD": (1000.0,  9999.0),
-    "XAGUSD": (10.0,    200.0),
-    "EURUSD": (0.80,    1.60),
-    "GBPUSD": (1.00,    2.00),
-    "AUDUSD": (0.50,    1.20),
-    "NZDUSD": (0.40,    1.10),
-    "USDCAD": (1.00,    1.80),
-    "USDCHF": (0.70,    1.30),
-    "USDJPY": (80.0,    200.0),
-    "EURJPY": (100.0,   200.0),
-    "GBPJPY": (120.0,   230.0),
-    "AUDJPY": (55.0,    130.0),
-    "CADJPY": (70.0,    130.0),
-    "CHFJPY": (100.0,   180.0),
-    "EURGBP": (0.60,    1.00),
-    "EURAUD": (1.30,    2.00),
-    "EURCAD": (1.20,    1.80),
-    "GBPAUD": (1.50,    2.30),
-    "GBPCAD": (1.50,    2.20),
-    "GBPCHF": (1.00,    1.60),
-    "AUDCAD": (0.80,    1.20),
-    "AUDNZD": (0.90,    1.30),
-    "EURNZD": (1.40,    1.90),
-    "GBPNZD": (1.80,    2.40),
+    "XAUUSD": (1000.0, 9999.0),
+    "XAGUSD": (10.0, 200.0),
+    "EURUSD": (0.80, 1.60),
+    "GBPUSD": (1.00, 2.00),
+    "AUDUSD": (0.50, 1.20),
+    "NZDUSD": (0.40, 1.10),
+    "USDCAD": (1.00, 1.80),
+    "USDCHF": (0.70, 1.30),
+    "USDJPY": (80.0, 200.0),
+    "EURJPY": (100.0, 200.0),
+    "GBPJPY": (120.0, 230.0),
+    "AUDJPY": (55.0, 130.0),
+    "CADJPY": (70.0, 130.0),
+    "CHFJPY": (100.0, 180.0),
+    "EURGBP": (0.60, 1.00),
+    "EURAUD": (1.30, 2.00),
+    "EURCAD": (1.20, 1.80),
+    "GBPAUD": (1.50, 2.30),
+    "GBPCAD": (1.50, 2.20),
+    "GBPCHF": (1.00, 1.60),
+    "AUDCAD": (0.80, 1.20),
+    "AUDNZD": (0.90, 1.30),
+    "EURNZD": (1.40, 1.90),
+    "GBPNZD": (1.80, 2.40),
     "BTCUSD": (10000.0, 500000.0),
-    "ETHUSD": (500.0,   30000.0),
-    "LTCUSD": (30.0,    2000.0),
-    "XRPUSD": (0.10,    20.0),
-    "US30":   (20000.0, 60000.0),
-    "US500":  (2000.0,  8000.0),
+    "ETHUSD": (500.0, 30000.0),
+    "LTCUSD": (30.0, 2000.0),
+    "XRPUSD": (0.10, 20.0),
+    "US30": (20000.0, 60000.0),
+    "US500": (2000.0, 8000.0),
     "NAS100": (10000.0, 30000.0),
-    "GER40":  (10000.0, 30000.0),
-    "UK100":  (6000.0,  12000.0),
-    "JP225":  (20000.0, 60000.0),
-    "USOIL":  (20.0,    200.0),
-    "UKOIL":  (20.0,    200.0),
+    "GER40": (10000.0, 30000.0),
+    "UK100": (6000.0, 12000.0),
+    "JP225": (20000.0, 60000.0),
+    "USOIL": (20.0, 200.0),
+    "UKOIL": (20.0, 200.0),
 }
 
 def _preco_valido(symbol: str, price: float) -> bool:
@@ -140,8 +129,8 @@ _SL_OBRIGATORIO = {"XAUUSD", "BTCUSD", "ETHUSD", "NAS100", "US30"}
 # PARSER DE SINAIS
 # =============================================================================
 SYMBOL_MAP = {
-    "gold": "XAUUSD",   "xauusd": "XAUUSD",
-    "goldm": "XAUUSD",  "goldm#": "XAUUSD",
+    "gold": "XAUUSD", "xauusd": "XAUUSD",
+    "goldm": "XAUUSD", "goldm#": "XAUUSD",
     "xauusd.": "XAUUSD", "gold.": "XAUUSD",
     "silver": "XAGUSD", "xagusd": "XAGUSD",
     "eurusd": "EURUSD", "gbpusd": "GBPUSD",
@@ -157,17 +146,17 @@ SYMBOL_MAP = {
     "chfjpy": "CHFJPY", "audnzd": "AUDNZD",
     "eurnzd": "EURNZD", "gbpnzd": "GBPNZD",
     "nas100": "NAS100", "nasdaq": "NAS100",
-    "us30": "US30",     "dow": "US30",
-    "us500": "US500",   "sp500": "US500",
-    "uk100": "UK100",   "ftse": "UK100",
-    "ger40": "GER40",   "dax": "GER40",
-    "jp225": "JP225",   "nikkei": "JP225",
+    "us30": "US30", "dow": "US30",
+    "us500": "US500", "sp500": "US500",
+    "uk100": "UK100", "ftse": "UK100",
+    "ger40": "GER40", "dax": "GER40",
+    "jp225": "JP225", "nikkei": "JP225",
     "btcusd": "BTCUSD", "bitcoin": "BTCUSD",
     "ethusd": "ETHUSD", "ethereum": "ETHUSD",
     "ltcusd": "LTCUSD", "litecoin": "LTCUSD",
     "xrpusd": "XRPUSD", "ripple": "XRPUSD",
-    "usoil": "USOIL",   "wti": "USOIL",
-    "ukoil": "UKOIL",   "brent": "UKOIL",
+    "usoil": "USOIL", "wti": "USOIL",
+    "ukoil": "UKOIL", "brent": "UKOIL",
 }
 
 def extrair_numeros(line: str, min_val: float = 0.0001) -> list:
@@ -175,15 +164,15 @@ def extrair_numeros(line: str, min_val: float = 0.0001) -> list:
 
 def pip_size(symbol: str) -> float:
     mapping = {
-        "XAUUSD": 1.0,    "XAGUSD": 0.1,
+        "XAUUSD": 1.0, "XAGUSD": 0.1,
         "EURUSD": 0.0001, "GBPUSD": 0.0001, "AUDUSD": 0.0001,
         "NZDUSD": 0.0001, "USDCAD": 0.0001, "USDCHF": 0.0001,
-        "USDJPY": 0.01,   "EURJPY": 0.01,   "GBPJPY": 0.01,
-        "AUDJPY": 0.01,   "CADJPY": 0.01,   "CHFJPY": 0.01,
+        "USDJPY": 0.01, "EURJPY": 0.01, "GBPJPY": 0.01,
+        "AUDJPY": 0.01, "CADJPY": 0.01, "CHFJPY": 0.01,
         "EURGBP": 0.0001, "EURAUD": 0.0001, "EURCAD": 0.0001,
         "GBPAUD": 0.0001, "GBPCAD": 0.0001, "GBPCHF": 0.0001,
         "AUDCAD": 0.0001, "AUDNZD": 0.0001, "EURNZD": 0.0001, "GBPNZD": 0.0001,
-        "BTCUSD": 1.0,    "ETHUSD": 0.1,    "LTCUSD": 0.1,    "XRPUSD": 0.0001,
+        "BTCUSD": 1.0, "ETHUSD": 0.1, "LTCUSD": 0.1, "XRPUSD": 0.0001,
         "US30": 1.0, "US500": 0.1, "NAS100": 1.0, "GER40": 1.0, "UK100": 1.0,
         "USOIL": 0.01, "UKOIL": 0.01,
     }
@@ -274,7 +263,6 @@ def parse_signal(text: str) -> Optional[dict]:
         )
         if m:
             entry = float(m.group(1))
-            log.info(f"[v2.3] Entry via padrão descritivo: {entry} | match: '{m.group(0).strip()}'")
 
     if not entry:
         for idx, line in enumerate(lines):
@@ -292,7 +280,6 @@ def parse_signal(text: str) -> Optional[dict]:
                         candidate = float(n)
                         if _preco_valido(symbol, candidate):
                             entry = candidate
-                            log.info(f"[v2.3.1] Entry em linha pós-descritivo: {entry}")
                             break
                     if entry:
                         break
@@ -303,7 +290,6 @@ def parse_signal(text: str) -> Optional[dict]:
         m = re.search(r"\bENTRY\s*[:\-]\s*(\d+(?:\.\d+)?)", full_text_up)
         if m:
             entry = float(m.group(1))
-            log.info(f"[v2.3] Entry via label 'Entry:': {entry}")
 
     if not entry:
         for line in lines:
@@ -415,12 +401,12 @@ def parse_signal(text: str) -> Optional[dict]:
     if trade_type == "BUY":
         tps_validos = [tp for tp in tps_validos if tp > entry]
         if sl and sl >= entry:
-            log.warning(f"[v2.3] SL {sl} >= entry {entry} em BUY — SL removido")
+            log.warning(f"SL {sl} >= entry {entry} em BUY — SL removido")
             sl = None
     else:
         tps_validos = [tp for tp in tps_validos if tp < entry]
         if sl and sl <= entry:
-            log.warning(f"[v2.3] SL {sl} <= entry {entry} em SELL — SL removido")
+            log.warning(f"SL {sl} <= entry {entry} em SELL — SL removido")
             sl = None
 
     if not tps_validos:
@@ -429,7 +415,7 @@ def parse_signal(text: str) -> Optional[dict]:
 
     if SL_OBRIGATORIO_TODOS or symbol in _SL_OBRIGATORIO:
         if not sl:
-            log.warning(f"Rejeitado: SL ausente para {symbol} (SL_OBRIGATORIO_TODOS={SL_OBRIGATORIO_TODOS})")
+            log.warning(f"Rejeitado: SL ausente para {symbol}")
             return None
 
     parsed = {
@@ -449,79 +435,11 @@ def parse_signal(text: str) -> Optional[dict]:
         parsed["entry_min"] = entry_min
         parsed["entry_max"] = entry_max
 
-    range_str = f" range=[{entry_min}-{entry_max}]" if entry_min else ""
-    log.info(f"PARSE OK | {parsed['symbol']} {parsed['type']} entry={parsed['entry']}{range_str} sl={parsed['sl']} tps={parsed['tps']}")
+    log.info(
+        f"PARSE OK | {parsed['symbol']} {parsed['type']} "
+        f"entry={parsed['entry']} sl={parsed['sl']} tps={parsed['tps']}"
+    )
     return parsed
-
-# =============================================================================
-# WHATSAPP — Meta Cloud API
-# =============================================================================
-def whatsapp_config_ok() -> bool:
-    return all([
-        WHATSAPP_TOKEN,
-        WHATSAPP_PHONE_NUMBER_ID,
-        WHATSAPP_TO,
-        WHATSAPP_TEMPLATE_EXEC,
-        WHATSAPP_TEMPLATE_LANG,
-    ])
-
-def limpar_texto_template(texto: str, limite: int = 180) -> str:
-    if texto is None:
-        return "-"
-    texto = str(texto).replace("\n", " ").replace("\r", " ").strip()
-    texto = re.sub(r"\s+", " ", texto)
-    if len(texto) > limite:
-        texto = texto[:limite - 3] + "..."
-    return texto or "-"
-
-def build_exec_components(s: dict, msg: str) -> list:
-    return [
-        {
-            "type": "body",
-            "parameters": [
-                {"type": "text", "text": limpar_texto_template(s.get("symbol", "-"), 30)},
-                {"type": "text", "text": limpar_texto_template(s.get("type", "-"), 20)},
-                {"type": "text", "text": limpar_texto_template(s.get("entry", "-"), 30)},
-                {"type": "text", "text": limpar_texto_template(msg, 180)},
-                {"type": "text", "text": limpar_texto_template(s.get("account", "-"), 40)},
-            ],
-        }
-    ]
-
-async def enviar_whatsapp_template(nome_template: str, componentes: list):
-    if not whatsapp_config_ok():
-        log.warning("WhatsApp Cloud API não configurado — pulando")
-        return
-
-    url = f"https://graph.facebook.com/{WHATSAPP_GRAPH_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages"
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": WHATSAPP_TO,
-        "type": "template",
-        "template": {
-            "name": nome_template,
-            "language": {"code": WHATSAPP_TEMPLATE_LANG},
-            "components": componentes,
-        },
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-            )
-
-            if 200 <= r.status_code < 300:
-                log.info(f"WhatsApp OK | template={nome_template} | to={WHATSAPP_TO}")
-            else:
-                log.error(f"WhatsApp ERRO {r.status_code} | {r.text}")
-    except Exception as e:
-        log.error(f"WhatsApp exceção: {e}")
 
 # =============================================================================
 # LISTENER DO TELETHON
@@ -549,13 +467,10 @@ def registrar_listener():
         sinal["source"] = nome
         signal_queue.append(sinal)
         log.info(
-            f"✅ Sinal enfileirado: {sinal['id']} | "
+            f"Sinal enfileirado: {sinal['id']} | "
             f"{sinal['type']} {sinal['symbol']} @ {sinal['entry']} | "
             f"{len(sinal['tps'])} TPs | SL: {sinal['sl']}"
         )
-
-        # Não envia WhatsApp aqui.
-        # A notificação será enviada somente quando o MT5 confirmar status="executed".
 
 # =============================================================================
 # STARTUP / SHUTDOWN
@@ -573,11 +488,6 @@ async def startup():
 
         registrar_listener()
         log.info(f"Listener ativo | Grupos monitorados: {SIGNAL_GROUPS or 'TODOS'}")
-
-        if whatsapp_config_ok():
-            log.info("WhatsApp Cloud API configurado com sucesso")
-        else:
-            log.warning("WhatsApp Cloud API ainda não configurado por completo")
     except Exception as e:
         log.error(f"Erro no startup: {e}")
 
@@ -602,7 +512,6 @@ async def health():
         "sinais_fila": len(signal_queue),
         "sinais_total": len(signal_history),
         "grupos": SIGNAL_GROUPS,
-        "whatsapp_configurado": whatsapp_config_ok(),
         "time": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -610,7 +519,7 @@ async def health():
 async def get_pending(authorization: str = Header(""), symbol: str = ""):
     check_token(authorization)
 
-    FAMILIAS = {
+    familias = {
         "XAUUSD": {"XAUUSD", "XAGUSD"},
         "FOREX": {"EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","NZDUSD","USDCAD",
                   "EURJPY","GBPJPY","EURGBP","EURAUD","EURCAD","GBPAUD","GBPCAD",
@@ -627,7 +536,7 @@ async def get_pending(authorization: str = Header(""), symbol: str = ""):
         return JSONResponse(status_code=200, content=signal_queue[0])
 
     sym_upper = symbol.upper()
-    aceitos = FAMILIAS.get(sym_upper, {sym_upper})
+    aceitos = familias.get(sym_upper, {sym_upper})
 
     sinal = next((s for s in signal_queue if s.get("symbol", "") in aceitos), None)
     if not sinal:
@@ -667,12 +576,6 @@ async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
     signal_history.append(sinal)
 
     log.info(f"Confirmação MT5: {body.id} | {body.status} | {body.message}")
-
-    # Notifica WhatsApp só para ordens realmente executadas
-    if body.status == "executed":
-        componentes = build_exec_components(sinal, body.message)
-        await enviar_whatsapp_template(WHATSAPP_TEMPLATE_EXEC, componentes)
-
     return {"ok": True, "id": body.id, "status": body.status}
 
 @app.get("/signals/queue")
@@ -705,8 +608,6 @@ async def test_signal(request_body: dict, authorization: str = Header("")):
 
     sinal["source"] = "Teste Manual"
     signal_queue.append(sinal)
-
-    # Não envia WhatsApp aqui. Só quando houver confirmação do MT5.
     return {"ok": True, "signal": sinal}
 
 @app.get("/groups")
