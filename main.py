@@ -15,20 +15,22 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 # ── variáveis de ambiente ─────────────────────────────────────────────────────
-API_ID    = os.environ["API_ID"]
-API_HASH  = os.environ["API_HASH"]
-PHONE     = os.environ["PHONE"]
-SECRET_KEY= os.environ.get("API_KEY", "chave-secreta")
+API_ID     = os.environ["API_ID"]
+API_HASH   = os.environ["API_HASH"]
+PHONE      = os.environ["PHONE"]
+SECRET_KEY = os.environ.get("API_KEY", "chave-secreta")
 
 # ── Telethon com StringSession ────────────────────────────────────────────────
 session_string = os.environ.get("SESSION_STRING", "")
 client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
 
-# ── configurações de sinais ───────────────────────────────────────────────────
-EVOLUTION_URL      = os.environ.get("EVOLUTION_URL", "")
-EVOLUTION_TOKEN    = os.environ.get("EVOLUTION_TOKEN", "")
-EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
-WHATSAPP_NUMBER    = os.environ.get("WHATSAPP_NUMBER", "")
+# ── configurações WhatsApp Cloud API ─────────────────────────────────────────
+WHATSAPP_TOKEN           = os.environ.get("WHATSAPP_TOKEN", "")
+WHATSAPP_PHONE_NUMBER_ID = os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "")
+WHATSAPP_TO              = os.environ.get("WHATSAPP_TO", "")
+WHATSAPP_TEMPLATE_EXEC   = os.environ.get("WHATSAPP_TEMPLATE_EXEC", "trade_execution_alert")
+WHATSAPP_TEMPLATE_LANG   = os.environ.get("WHATSAPP_TEMPLATE_LANG", "pt_BR")
+WHATSAPP_GRAPH_VERSION   = os.environ.get("WHATSAPP_GRAPH_VERSION", "v23.0")
 
 SIGNAL_GROUPS = [
     int(x.strip())
@@ -37,11 +39,11 @@ SIGNAL_GROUPS = [
 ]
 
 # ── fila de sinais (em memória) ───────────────────────────────────────────────
-signal_queue:   list[dict] = []
+signal_queue: list[dict] = []
 signal_history: list[dict] = []
 
 # ── app ───────────────────────────────────────────────────────────────────────
-app = FastAPI(title="TS Signal Bridge", version="2.4.0")
+app = FastAPI(title="TS Signal Bridge", version="2.5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -66,7 +68,6 @@ def e_final_de_semana() -> bool:
 # =============================================================================
 # [v2.2] FILTROS ANTI-LIXO
 # =============================================================================
-
 _RECAP_PATTERNS = [
     r"closed\s+trade",
     r"total[:\s]+[+\-]?\d+\s*pips",
@@ -140,7 +141,6 @@ _SL_OBRIGATORIO = {"XAUUSD", "BTCUSD", "ETHUSD", "NAS100", "US30"}
 # =============================================================================
 SYMBOL_MAP = {
     "gold": "XAUUSD",   "xauusd": "XAUUSD",
-    # ↓ Adicionar estas linhas para XM
     "goldm": "XAUUSD",  "goldm#": "XAUUSD",
     "xauusd.": "XAUUSD", "gold.": "XAUUSD",
     "silver": "XAGUSD", "xagusd": "XAGUSD",
@@ -171,7 +171,7 @@ SYMBOL_MAP = {
 }
 
 def extrair_numeros(line: str, min_val: float = 0.0001) -> list:
-    return [float(n) for n in re.findall(r'\d+(?:\.\d+)?', line) if float(n) > min_val]
+    return [float(n) for n in re.findall(r"\d+(?:\.\d+)?", line) if float(n) > min_val]
 
 def pip_size(symbol: str) -> float:
     mapping = {
@@ -198,8 +198,8 @@ def convert_pips_to_prices(entry: float, pip_targets: list, trade_type: str, sym
     return result
 
 def parse_signal(text: str) -> Optional[dict]:
-    text_clean = text.strip().replace('\\n', '\n')
-    text_clean = re.sub(r'\s*[|;]\s*', '\n', text_clean)
+    text_clean = text.strip().replace("\\n", "\n")
+    text_clean = re.sub(r"\s*[|;]\s*", "\n", text_clean)
     lines = [l.strip() for l in text_clean.split("\n") if l.strip()]
     if not lines:
         return None
@@ -208,7 +208,6 @@ def parse_signal(text: str) -> Optional[dict]:
         log.info("Rejeitado: mensagem identificada como recap/resultado")
         return None
 
-    # ── Detectar símbolo ──────────────────────────────────────────────────────
     symbol = None
     for search in [l.upper() for l in lines]:
         for key, val in SYMBOL_MAP.items():
@@ -220,83 +219,75 @@ def parse_signal(text: str) -> Optional[dict]:
     if not symbol:
         return None
 
-    # ── Detectar tipo BUY/SELL ────────────────────────────────────────────────
     full_text_up = text_clean.upper()
     trade_type = None
-    if re.search(r'\bBUY\b|\bCOMPRA\b|\bLONG\b', full_text_up):
+    if re.search(r"\bBUY\b|\bCOMPRA\b|\bLONG\b", full_text_up):
         trade_type = "BUY"
-    elif re.search(r'\bSELL\b|\bVENDA\b|\bSHORT\b', full_text_up):
+    elif re.search(r"\bSELL\b|\bVENDA\b|\bSHORT\b", full_text_up):
         trade_type = "SELL"
     if not trade_type:
         return None
 
-    # ── Detectar entry ────────────────────────────────────────────────────────
-    entry      = None
-    entry_min  = None
-    entry_max  = None
+    entry = None
+    entry_min = None
+    entry_max = None
 
-    # "between X till/to Y"
-    m = re.search(r'between\s+(\d+(?:\.\d+)?)\s+(?:till|to|and|-)\s+(\d+(?:\.\d+)?)', full_text_up)
+    m = re.search(r"between\s+(\d+(?:\.\d+)?)\s+(?:till|to|and|-)\s+(\d+(?:\.\d+)?)", full_text_up)
     if m:
         v1, v2 = float(m.group(1)), float(m.group(2))
-        entry_min, entry_max = min(v1,v2), max(v1,v2)
+        entry_min, entry_max = min(v1, v2), max(v1, v2)
         entry = entry_min if trade_type == "BUY" else entry_max
 
-    # "@ X - Y" ou "@ X / Y"
     if not entry:
-        m = re.search(r'@\s*(\d+(?:\.\d+)?)\s*[-/]\s*(\d+(?:\.\d+)?)', full_text_up)
+        m = re.search(r"@\s*(\d+(?:\.\d+)?)\s*[-/]\s*(\d+(?:\.\d+)?)", full_text_up)
         if m:
             v1, v2 = float(m.group(1)), float(m.group(2))
-            entry_min, entry_max = min(v1,v2), max(v1,v2)
+            entry_min, entry_max = min(v1, v2), max(v1, v2)
             entry = entry_min if trade_type == "BUY" else entry_max
 
-    # "X/Y" na mesma linha do símbolo
     if not entry:
         for line in lines:
-            h = re.sub(r'[^\w\s/\.\-]', ' ', line.upper())
-            m = re.search(r'(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)', h)
+            h = re.sub(r"[^\w\s/\.\-]", " ", line.upper())
+            m = re.search(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", h)
             if m:
                 v1, v2 = float(m.group(1)), float(m.group(2))
                 if v1 > 100 and v2 > 100:
-                    entry_min, entry_max = min(v1,v2), max(v1,v2)
+                    entry_min, entry_max = min(v1, v2), max(v1, v2)
                     entry = entry_max
                     break
 
-    # "@ X" simples
     if not entry:
-        m = re.search(r'@\s*(\d+(?:\.\d+)?)', full_text_up)
+        m = re.search(r"@\s*(\d+(?:\.\d+)?)", full_text_up)
         if m:
             entry = float(m.group(1))
 
-    # [v2.3] Entry via padrão descritivo — inclui formatos do AnabelSignals
     if not entry:
         m = re.search(
-            r'(?:'
-            r'TRADING\s+ON'
-            r'|PRICE\s+IS(?:\s+AT)?'
-            r'|PIVOT\s+LEVEL\s+'
-            r'|TESTS?\s+(?:AN?\s+)?(?:IMPORTANT\s+)?(?:PSYCHOLOGICAL\s+)?LEVEL'
-            r'|INSTRUMENT\s+TESTS?'
-            r')\s*(\d+(?:\.\d+)?)',
+            r"(?:"
+            r"TRADING\s+ON"
+            r"|PRICE\s+IS(?:\s+AT)?"
+            r"|PIVOT\s+LEVEL\s+"
+            r"|TESTS?\s+(?:AN?\s+)?(?:IMPORTANT\s+)?(?:PSYCHOLOGICAL\s+)?LEVEL"
+            r"|INSTRUMENT\s+TESTS?"
+            r")\s*(\d+(?:\.\d+)?)",
             full_text_up
         )
         if m:
             entry = float(m.group(1))
             log.info(f"[v2.3] Entry via padrão descritivo: {entry} | match: '{m.group(0).strip()}'")
 
-    # [v2.3.1] Entry em linha isolada após padrão descritivo (AnabelSignals)
     if not entry:
         for idx, line in enumerate(lines):
             up_line = line.upper()
             if re.search(
-                r'TESTS?\s+(?:AN?\s+)?(?:IMPORTANT\s+)?(?:PSYCHOLOGICAL\s+)?LEVEL'
-                r'|INSTRUMENT\s+TESTS?'
-                r'|TRADING\s+ON'
-                r'|PIVOT\s+LEVEL',
+                r"TESTS?\s+(?:AN?\s+)?(?:IMPORTANT\s+)?(?:PSYCHOLOGICAL\s+)?LEVEL"
+                r"|INSTRUMENT\s+TESTS?"
+                r"|TRADING\s+ON"
+                r"|PIVOT\s+LEVEL",
                 up_line
             ):
                 for next_line in lines[idx:idx+3]:
-                    nums = re.findall(r'\d+(?:\.\d+)?', next_line)
+                    nums = re.findall(r"\d+(?:\.\d+)?", next_line)
                     for n in nums:
                         candidate = float(n)
                         if _preco_valido(symbol, candidate):
@@ -308,31 +299,28 @@ def parse_signal(text: str) -> Optional[dict]:
             if entry:
                 break
 
-    # PASSO 5 — "Entry: X" ou "Entry - X"
     if not entry:
-        m = re.search(r'\bENTRY\s*[:\-]\s*(\d+(?:\.\d+)?)', full_text_up)
+        m = re.search(r"\bENTRY\s*[:\-]\s*(\d+(?:\.\d+)?)", full_text_up)
         if m:
             entry = float(m.group(1))
             log.info(f"[v2.3] Entry via label 'Entry:': {entry}")
 
-    # PASSO 6 — "X-Y" ou "X/Y" na linha do sinal
     if not entry:
         for line in lines:
-            h = re.sub(r'[^\w\s/\.\-]', ' ', line.upper())
-            if re.search(r'\bBUY\b|\bSELL\b', h) or any(k.upper() in h for k in SYMBOL_MAP):
-                m = re.search(r'(\d+(?:\.\d+)?)\s*[-/]\s*(\d+(?:\.\d+)?)', line)
+            h = re.sub(r"[^\w\s/\.\-]", " ", line.upper())
+            if re.search(r"\bBUY\b|\bSELL\b", h) or any(k.upper() in h for k in SYMBOL_MAP):
+                m = re.search(r"(\d+(?:\.\d+)?)\s*[-/]\s*(\d+(?:\.\d+)?)", line)
                 if m:
                     v1, v2 = float(m.group(1)), float(m.group(2))
                     if v1 > 100 and v2 > 100:
-                        entry_min, entry_max = min(v1,v2), max(v1,v2)
+                        entry_min, entry_max = min(v1, v2), max(v1, v2)
                         entry = entry_min if trade_type == "BUY" else entry_max
                         break
 
-    # PASSO 7 — Fallback: último número da linha do sinal
     if not entry:
         for line in lines:
-            h = re.sub(r'[^\w\s/\.\-]', ' ', line.upper())
-            if re.search(r'\bBUY\b|\bSELL\b', h) or any(k.upper() in h for k in SYMBOL_MAP):
+            h = re.sub(r"[^\w\s/\.\-]", " ", line.upper())
+            if re.search(r"\bBUY\b|\bSELL\b", h) or any(k.upper() in h for k in SYMBOL_MAP):
                 nums = extrair_numeros(line, min_val=0.0001)
                 if nums:
                     entry = nums[-1]
@@ -345,7 +333,6 @@ def parse_signal(text: str) -> Optional[dict]:
         log.info(f"Rejeitado: entry={entry} fora da faixa esperada para {symbol}")
         return None
 
-    # ── TPs e SL ──────────────────────────────────────────────────────────────
     sl = None
     tps_absolute = []
     tps_pips = []
@@ -355,19 +342,18 @@ def parse_signal(text: str) -> Optional[dict]:
         line = lines[i]
         up = line.upper()
 
-        # [v2.3.1] SL — adicionado MY STOP LOSS e STOP: / STOP -
         if re.search(
-            r'\bSTOP\s*LOSS\b'
-            r'|\bSL\b'
-            r'|\bSI\b'
-            r'|\bRECOMMENDED\s+STOP\s+LOSS\b'
-            r'|\bMY\s+STOP\s+LOSS\b'
-            r'|\bSTOP\s*[:\-]',
+            r"\bSTOP\s*LOSS\b"
+            r"|\bSL\b"
+            r"|\bSI\b"
+            r"|\bRECOMMENDED\s+STOP\s+LOSS\b"
+            r"|\bMY\s+STOP\s+LOSS\b"
+            r"|\bSTOP\s*[:\-]",
             up
         ):
-            nums = [float(n) for n in re.findall(r'\d+\.\d+', line)]
+            nums = [float(n) for n in re.findall(r"\d+\.\d+", line)]
             if not nums:
-                nums = [float(n) for n in re.findall(r'\d+', line) if float(n) > 10]
+                nums = [float(n) for n in re.findall(r"\d+", line) if float(n) > 10]
             if nums:
                 sl = nums[-1]
             elif i + 1 < len(lines):
@@ -375,23 +361,22 @@ def parse_signal(text: str) -> Optional[dict]:
                 if nx:
                     sl = nx[-1]
 
-        # [v2.3.1] TP — adicionado TARGET: / TARGET -
         elif re.search(
-            r'\bTP\d*\b'
-            r'|\d+TP\b'
-            r'|\bTARGET\b'
-            r'|\bALVO\b'
-            r'|\bTAKE\s*PROFIT\b'
-            r'|\bTARGET\s*[:\-]',
+            r"\bTP\d*\b"
+            r"|\d+TP\b"
+            r"|\bTARGET\b"
+            r"|\bALVO\b"
+            r"|\bTAKE\s*PROFIT\b"
+            r"|\bTARGET\s*[:\-]",
             up
         ):
-            is_pips = bool(re.search(r'\dpips?', up, re.IGNORECASE))
+            is_pips = bool(re.search(r"\dpips?", up, re.IGNORECASE))
             if is_pips:
-                all_nums = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', line) if float(n) > 1]
+                all_nums = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", line) if float(n) > 1]
                 tps_pips.extend(all_nums)
             else:
-                nums_decimal = [float(n) for n in re.findall(r'\d+\.\d+', line) if float(n) > 0.001]
-                nums_int     = [float(n) for n in re.findall(r'\b(\d{3,})\b', line)]
+                nums_decimal = [float(n) for n in re.findall(r"\d+\.\d+", line) if float(n) > 0.001]
+                nums_int = [float(n) for n in re.findall(r"\b(\d{3,})\b", line)]
                 if nums_decimal:
                     tps_absolute.extend(nums_decimal)
                 elif nums_int:
@@ -399,17 +384,17 @@ def parse_signal(text: str) -> Optional[dict]:
 
         i += 1
 
-    tp_standalone = re.findall(r'\bTP\s*[:\-]?\s*(\d+(?:\.\d+)?)', full_text_up)
+    tp_standalone = re.findall(r"\bTP\s*[:\-]?\s*(\d+(?:\.\d+)?)", full_text_up)
     for v in tp_standalone:
         fv = float(v)
         if fv > 100 and fv not in tps_absolute:
             tps_absolute.append(fv)
 
     if not tps_absolute and not tps_pips:
-        tp_matches = re.findall(r'(?:TP\s*\d*|TARGET\s*\d*)[\s.:]*?(\d+(?:\.\d+)?)', full_text_up)
+        tp_matches = re.findall(r"(?:TP\s*\d*|TARGET\s*\d*)[\s.:]*?(\d+(?:\.\d+)?)", full_text_up)
         for v in tp_matches:
             fv = float(v)
-            if '.' in v and fv > 0.001:
+            if "." in v and fv > 0.001:
                 tps_absolute.append(fv)
             elif fv >= 100:
                 tps_absolute.append(fv)
@@ -448,17 +433,18 @@ def parse_signal(text: str) -> Optional[dict]:
             return None
 
     parsed = {
-        "id":     str(uuid.uuid4()),
+        "id": str(uuid.uuid4()),
         "symbol": symbol,
-        "type":   trade_type,
-        "entry":  entry,
-        "sl":     sl or 0.0,
-        "tps":    tps_validos[:4],
+        "type": trade_type,
+        "entry": entry,
+        "sl": sl or 0.0,
+        "tps": tps_validos[:4],
         "source": "Telegram",
-        "raw":    text_clean[:300],
-        "time":   datetime.now(timezone.utc).isoformat(),
+        "raw": text_clean[:300],
+        "time": datetime.now(timezone.utc).isoformat(),
         "status": "pending",
     }
+
     if entry_min is not None:
         parsed["entry_min"] = entry_min
         parsed["entry_max"] = entry_max
@@ -467,37 +453,75 @@ def parse_signal(text: str) -> Optional[dict]:
     log.info(f"PARSE OK | {parsed['symbol']} {parsed['type']} entry={parsed['entry']}{range_str} sl={parsed['sl']} tps={parsed['tps']}")
     return parsed
 
+# =============================================================================
+# WHATSAPP — Meta Cloud API
+# =============================================================================
+def whatsapp_config_ok() -> bool:
+    return all([
+        WHATSAPP_TOKEN,
+        WHATSAPP_PHONE_NUMBER_ID,
+        WHATSAPP_TO,
+        WHATSAPP_TEMPLATE_EXEC,
+        WHATSAPP_TEMPLATE_LANG,
+    ])
 
-# =============================================================================
-# WHATSAPP — Evolution API
-# =============================================================================
-async def enviar_whatsapp(mensagem: str):
-    if not all([EVOLUTION_URL, EVOLUTION_TOKEN, WHATSAPP_NUMBER, EVOLUTION_INSTANCE]):
-        log.warning("WhatsApp não configurado — pulando")
+def limpar_texto_template(texto: str, limite: int = 180) -> str:
+    if texto is None:
+        return "-"
+    texto = str(texto).replace("\n", " ").replace("\r", " ").strip()
+    texto = re.sub(r"\s+", " ", texto)
+    if len(texto) > limite:
+        texto = texto[:limite - 3] + "..."
+    return texto or "-"
+
+def build_exec_components(s: dict, msg: str) -> list:
+    return [
+        {
+            "type": "body",
+            "parameters": [
+                {"type": "text", "text": limpar_texto_template(s.get("symbol", "-"), 30)},
+                {"type": "text", "text": limpar_texto_template(s.get("type", "-"), 20)},
+                {"type": "text", "text": limpar_texto_template(s.get("entry", "-"), 30)},
+                {"type": "text", "text": limpar_texto_template(msg, 180)},
+                {"type": "text", "text": limpar_texto_template(s.get("account", "-"), 40)},
+            ],
+        }
+    ]
+
+async def enviar_whatsapp_template(nome_template: str, componentes: list):
+    if not whatsapp_config_ok():
+        log.warning("WhatsApp Cloud API não configurado — pulando")
         return
-    url = f"{EVOLUTION_URL}/message/sendText/{EVOLUTION_INSTANCE}"
+
+    url = f"https://graph.facebook.com/{WHATSAPP_GRAPH_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": WHATSAPP_TO,
+        "type": "template",
+        "template": {
+            "name": nome_template,
+            "language": {"code": WHATSAPP_TEMPLATE_LANG},
+            "components": componentes,
+        },
+    }
+
     try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.post(url,
-                headers={"apikey": EVOLUTION_TOKEN, "Content-Type": "application/json"},
-                json={"number": WHATSAPP_NUMBER, "text": mensagem, "delay": 0}
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
             )
-            log.info(f"WhatsApp {'OK' if r.status_code==201 else 'ERRO '+str(r.status_code)}: {mensagem[:60]}")
+
+            if 200 <= r.status_code < 300:
+                log.info(f"WhatsApp OK | template={nome_template} | to={WHATSAPP_TO}")
+            else:
+                log.error(f"WhatsApp ERRO {r.status_code} | {r.text}")
     except Exception as e:
         log.error(f"WhatsApp exceção: {e}")
-
-def fmt_sinal(s: dict) -> str:
-    tps = "\n".join([f"  TP{i+1}: {t}" for i, t in enumerate(s['tps'])])
-    return (f"🔔 *SINAL RECEBIDO*\n"
-            f"{'🟢 COMPRA' if s['type']=='BUY' else '🔴 VENDA'} {s['symbol']}\n"
-            f"Entry: {s['entry']}\n{tps}\nSL: {s['sl']}\n"
-            f"Fonte: {s['source']}\n⏰ {datetime.now().strftime('%H:%M:%S')}")
-
-def fmt_exec(s: dict, status: str, msg: str) -> str:
-    icon = "✅" if status == "executed" else "❌"
-    return (f"{icon} *ORDEM {status.upper()}*\n"
-            f"{s['type']} {s['symbol']} @ {s['entry']}\n{msg}\n"
-            f"⏰ {datetime.now().strftime('%H:%M:%S')}")
 
 # =============================================================================
 # LISTENER DO TELETHON
@@ -505,26 +529,33 @@ def fmt_exec(s: dict, status: str, msg: str) -> str:
 def registrar_listener():
     @client.on(events.NewMessage(chats=SIGNAL_GROUPS if SIGNAL_GROUPS else None, incoming=True, outgoing=True))
     async def handler(event):
-        # [v2.4] FILTRO FINAL DE SEMANA ───────────────────────────────────────
         if e_final_de_semana():
             log.debug("Final de semana — mensagem ignorada")
             return
-        # ─────────────────────────────────────────────────────────────────────
 
-        chat  = await event.get_chat()
+        chat = await event.get_chat()
         texto = event.raw_text or ""
-        nome  = getattr(chat, "title", str(event.chat_id))
+        nome = getattr(chat, "title", str(event.chat_id))
         log.info(f"Mensagem recebida | Grupo: {nome} ({event.chat_id}) | Texto: {texto[:80]}")
+
         if not event.is_group and not event.is_channel:
             return
+
         sinal = parse_signal(texto)
         if not sinal:
             log.info("Mensagem não reconhecida como sinal — ignorada")
             return
+
         sinal["source"] = nome
         signal_queue.append(sinal)
-        log.info(f"✅ Sinal enfileirado: {sinal['id']} | {sinal['type']} {sinal['symbol']} @ {sinal['entry']} | {len(sinal['tps'])} TPs | SL: {sinal['sl']}")
-        await enviar_whatsapp(fmt_sinal(sinal))
+        log.info(
+            f"✅ Sinal enfileirado: {sinal['id']} | "
+            f"{sinal['type']} {sinal['symbol']} @ {sinal['entry']} | "
+            f"{len(sinal['tps'])} TPs | SL: {sinal['sl']}"
+        )
+
+        # Não envia WhatsApp aqui.
+        # A notificação será enviada somente quando o MT5 confirmar status="executed".
 
 # =============================================================================
 # STARTUP / SHUTDOWN
@@ -539,8 +570,14 @@ async def startup():
             )
             session_str = client.session.save()
             log.info(f"Conectado ao Telegram | SESSION_STRING={session_str}")
+
         registrar_listener()
         log.info(f"Listener ativo | Grupos monitorados: {SIGNAL_GROUPS or 'TODOS'}")
+
+        if whatsapp_config_ok():
+            log.info("WhatsApp Cloud API configurado com sucesso")
+        else:
+            log.warning("WhatsApp Cloud API ainda não configurado por completo")
     except Exception as e:
         log.error(f"Erro no startup: {e}")
 
@@ -560,12 +597,13 @@ def check_token(authorization: str):
 @app.get("/health")
 async def health():
     return {
-        "status":       "online",
-        "telegram":     client.is_connected(),
-        "sinais_fila":  len(signal_queue),
+        "status": "online",
+        "telegram": client.is_connected(),
+        "sinais_fila": len(signal_queue),
         "sinais_total": len(signal_history),
-        "grupos":       SIGNAL_GROUPS,
-        "time":         datetime.now(timezone.utc).isoformat(),
+        "grupos": SIGNAL_GROUPS,
+        "whatsapp_configurado": whatsapp_config_ok(),
+        "time": datetime.now(timezone.utc).isoformat(),
     }
 
 @app.get("/signal/pending")
@@ -574,12 +612,12 @@ async def get_pending(authorization: str = Header(""), symbol: str = ""):
 
     FAMILIAS = {
         "XAUUSD": {"XAUUSD", "XAGUSD"},
-        "FOREX":  {"EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","NZDUSD","USDCAD",
-                   "EURJPY","GBPJPY","EURGBP","EURAUD","EURCAD","GBPAUD","GBPCAD",
-                   "GBPCHF","AUDCAD","AUDJPY","CADJPY","CHFJPY","AUDNZD","EURNZD","GBPNZD"},
-        "INDEX":  {"US30","US500","NAS100","GER40","UK100","JP225"},
+        "FOREX": {"EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","NZDUSD","USDCAD",
+                  "EURJPY","GBPJPY","EURGBP","EURAUD","EURCAD","GBPAUD","GBPCAD",
+                  "GBPCHF","AUDCAD","AUDJPY","CADJPY","CHFJPY","AUDNZD","EURNZD","GBPNZD"},
+        "INDEX": {"US30","US500","NAS100","GER40","UK100","JP225"},
         "CRYPTO": {"BTCUSD","ETHUSD","LTCUSD","XRPUSD"},
-        "OIL":    {"USOIL","UKOIL"},
+        "OIL": {"USOIL","UKOIL"},
     }
 
     if not symbol:
@@ -606,23 +644,34 @@ async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
         sinal_hist = next((s for s in signal_history if s["id"] == body.id), None)
         if sinal_hist:
             return {"ok": True, "id": body.id, "status": "already_confirmed"}
-        # ID desconhecido — aceita mesmo assim (robô pode ter reiniciado)
-        sinal = {"id": body.id, "symbol": "?", "type": "?", "entry": 0,
-                 "tps": [], "sl": 0, "source": "MT5"}
 
-    # [v2.4] Remove da fila independente do status (executed, ignored, failed)
+        sinal = {
+            "id": body.id,
+            "symbol": "?",
+            "type": "?",
+            "entry": 0,
+            "tps": [],
+            "sl": 0,
+            "source": "MT5",
+        }
+
     if sinal in signal_queue:
         signal_queue.remove(sinal)
 
-    sinal.update({"status": body.status, "mt5_msg": body.message,
-                  "account": body.account,
-                  "executed": datetime.now(timezone.utc).isoformat()})
+    sinal.update({
+        "status": body.status,
+        "mt5_msg": body.message,
+        "account": body.account,
+        "executed": datetime.now(timezone.utc).isoformat(),
+    })
     signal_history.append(sinal)
+
     log.info(f"Confirmação MT5: {body.id} | {body.status} | {body.message}")
 
-    # [v2.4] Notifica WhatsApp apenas para executed (evita spam de ignored/failed)
+    # Notifica WhatsApp só para ordens realmente executadas
     if body.status == "executed":
-        await enviar_whatsapp(fmt_exec(sinal, body.status, body.message))
+        componentes = build_exec_components(sinal, body.message)
+        await enviar_whatsapp_template(WHATSAPP_TEMPLATE_EXEC, componentes)
 
     return {"ok": True, "id": body.id, "status": body.status}
 
@@ -645,15 +694,19 @@ async def clear_queue(authorization: str = Header("")):
 @app.post("/signal/test")
 async def test_signal(request_body: dict, authorization: str = Header("")):
     check_token(authorization)
+
     text = request_body.get("text", "")
     if not text:
         raise HTTPException(status_code=400, detail="Campo 'text' obrigatório")
+
     sinal = parse_signal(text)
     if not sinal:
         raise HTTPException(status_code=422, detail="Texto não reconhecido como sinal")
+
     sinal["source"] = "Teste Manual"
     signal_queue.append(sinal)
-    await enviar_whatsapp(fmt_sinal(sinal))
+
+    # Não envia WhatsApp aqui. Só quando houver confirmação do MT5.
     return {"ok": True, "signal": sinal}
 
 @app.get("/groups")
@@ -661,9 +714,12 @@ async def list_groups(authorization: str = Header("")):
     check_token(authorization)
     if not client.is_connected():
         raise HTTPException(status_code=503, detail="Telegram não conectado")
+
     dialogs = await client.get_dialogs()
-    groups  = [{"id": d.id, "name": d.name, "type": str(type(d.entity).__name__)}
-               for d in dialogs if d.is_group or d.is_channel]
+    groups = [
+        {"id": d.id, "name": d.name, "type": str(type(d.entity).__name__)}
+        for d in dialogs if d.is_group or d.is_channel
+    ]
     return {"groups": groups, "total": len(groups)}
 
 @app.get("/messages/{group_id}")
@@ -671,5 +727,6 @@ async def get_messages(group_id: int, limit: int = 20, authorization: str = Head
     check_token(authorization)
     if not client.is_connected():
         raise HTTPException(status_code=503, detail="Telegram não conectado")
+
     msgs = await client.get_messages(group_id, limit=limit)
     return {"messages": [{"id": m.id, "text": m.text, "date": str(m.date)} for m in msgs]}
