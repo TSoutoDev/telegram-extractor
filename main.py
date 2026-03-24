@@ -5,7 +5,8 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from pydantic import BaseModel
 from typing import Optional
-import os, re, uuid, logging, httpx
+import os, re, uuid, logging, json
+import urllib.request, urllib.parse
 from datetime import datetime, timezone
 
 # ── logging ───────────────────────────────────────────────────────────────────
@@ -23,7 +24,7 @@ SECRET_KEY = os.environ.get("API_KEY", "chave-secreta")
 #   TG_NOTIFY_TOKEN  → token do bot  (ex: 7412345678:AAFxxxxx)
 #   TG_NOTIFY_CHATID → chat_id do destino (ex: -1001234567890 para grupo/canal
 #                       ou 123456789 para DM)
-TG_NOTIFY_TOKEN  = os.environ.get("TG_BOT_KEY", "")
+TG_NOTIFY_TOKEN  = os.environ.get("TG_NOTIFY_TOKEN", "")
 TG_NOTIFY_CHATID = os.environ.get("TG_NOTIFY_CHATID", "")
 
 # ── Telethon com StringSession ────────────────────────────────────────────────
@@ -64,19 +65,20 @@ async def enviar_telegram(mensagem: str) -> None:
     if not TG_NOTIFY_TOKEN or not TG_NOTIFY_CHATID:
         log.warning("TG_NOTIFY_TOKEN ou TG_NOTIFY_CHATID não configurados — notificação ignorada")
         return
-    url = f"https://api.telegram.org/bot{TG_NOTIFY_TOKEN}/sendMessage"
-    payload = {
-        "chat_id":    TG_NOTIFY_CHATID,
-        "text":       mensagem,
-        "parse_mode": "HTML",
-    }
     try:
-        async with httpx.AsyncClient(timeout=10) as http:
-            resp = await http.post(url, json=payload)
-            if resp.status_code == 200:
-                log.info("Telegram notificado com sucesso")
-            else:
-                log.warning(f"Telegram HTTP {resp.status_code}: {resp.text[:200]}")
+        url = f"https://api.telegram.org/bot{TG_NOTIFY_TOKEN}/sendMessage"
+        payload = json.dumps({
+            "chat_id":    TG_NOTIFY_CHATID,
+            "text":       mensagem,
+            "parse_mode": "HTML",
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            log.info(f"Telegram notificado com sucesso [HTTP {resp.status}]")
     except Exception as e:
         log.error(f"Erro ao enviar notificação Telegram: {e}")
 
