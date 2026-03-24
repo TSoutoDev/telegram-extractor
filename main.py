@@ -24,8 +24,8 @@ SECRET_KEY = os.environ.get("API_KEY", "chave-secreta")
 #   TG_NOTIFY_TOKEN  → token do bot  (ex: 7412345678:AAFxxxxx)
 #   TG_NOTIFY_CHATID → chat_id do destino (ex: -1001234567890 para grupo/canal
 #                       ou 123456789 para DM)
-TG_NOTIFY_TOKEN  = os.environ.get("TG_NOTIFY_TOKEN", "")
-TG_NOTIFY_CHATID = os.environ.get("TG_NOTIFY_CHATID", "")
+TG_NOTIFY_TOKEN  = os.environ.get("NOTIF_KEY", "")
+TG_NOTIFY_CHATID = os.environ.get("NOTIF_CHAT", "")
 
 # ── Telethon com StringSession ────────────────────────────────────────────────
 session_string = os.environ.get("SESSION_STRING", "")
