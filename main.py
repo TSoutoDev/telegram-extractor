@@ -5,7 +5,7 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from pydantic import BaseModel
 from typing import Optional
-import os, re, uuid, logging
+import os, re, uuid, logging, httpx
 from datetime import datetime, timezone
 
 # ── logging ───────────────────────────────────────────────────────────────────
@@ -13,10 +13,18 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 # ── variáveis de ambiente ─────────────────────────────────────────────────────
-API_ID = os.environ["API_ID"]
+API_ID   = os.environ["API_ID"]
 API_HASH = os.environ["API_HASH"]
-PHONE = os.environ["PHONE"]
+PHONE    = os.environ["PHONE"]
 SECRET_KEY = os.environ.get("API_KEY", "chave-secreta")
+
+# ── Bot Telegram para notificações ───────────────────────────────────────────
+# Configure essas duas variáveis no Railway (Settings > Variables):
+#   TG_NOTIFY_TOKEN  → token do bot  (ex: 7412345678:AAFxxxxx)
+#   TG_NOTIFY_CHATID → chat_id do destino (ex: -1001234567890 para grupo/canal
+#                       ou 123456789 para DM)
+TG_NOTIFY_TOKEN  = os.environ.get("TG_NOTIFY_TOKEN", "")
+TG_NOTIFY_CHATID = os.environ.get("TG_NOTIFY_CHATID", "")
 
 # ── Telethon com StringSession ────────────────────────────────────────────────
 session_string = os.environ.get("SESSION_STRING", "")
@@ -29,11 +37,11 @@ SIGNAL_GROUPS = [
 ]
 
 # ── fila de sinais (em memória) ───────────────────────────────────────────────
-signal_queue: list[dict] = []
+signal_queue:   list[dict] = []
 signal_history: list[dict] = []
 
 # ── app ───────────────────────────────────────────────────────────────────────
-app = FastAPI(title="TS Signal Bridge", version="2.6.0")
+app = FastAPI(title="TS Signal Bridge", version="2.7.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,10 +51,39 @@ app.add_middleware(
 )
 
 class ConfirmRequest(BaseModel):
-    id: str
-    status: str
+    id:      str
+    status:  str
     message: str
     account: Optional[str] = ""
+
+# =============================================================================
+# NOTIFICAÇÃO TELEGRAM (substitui WhatsApp)
+# =============================================================================
+async def enviar_telegram(mensagem: str) -> None:
+    """Envia mensagem via Bot API do Telegram (parse_mode=HTML)."""
+    if not TG_NOTIFY_TOKEN or not TG_NOTIFY_CHATID:
+        log.warning("TG_NOTIFY_TOKEN ou TG_NOTIFY_CHATID não configurados — notificação ignorada")
+        return
+    url = f"https://api.telegram.org/bot{TG_NOTIFY_TOKEN}/sendMessage"
+    payload = {
+        "chat_id":    TG_NOTIFY_CHATID,
+        "text":       mensagem,
+        "parse_mode": "HTML",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as http:
+            resp = await http.post(url, json=payload)
+            if resp.status_code == 200:
+                log.info("Telegram notificado com sucesso")
+            else:
+                log.warning(f"Telegram HTTP {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        log.error(f"Erro ao enviar notificação Telegram: {e}")
+
+
+def _fmt_tps(tps: list) -> str:
+    return " / ".join(str(tp) for tp in tps)
+
 
 # =============================================================================
 # FILTRO FINAL DE SEMANA
@@ -104,14 +141,14 @@ _PRICE_RANGES = {
     "ETHUSD": (500.0, 30000.0),
     "LTCUSD": (30.0, 2000.0),
     "XRPUSD": (0.10, 20.0),
-    "US30": (20000.0, 60000.0),
-    "US500": (2000.0, 8000.0),
+    "US30":   (20000.0, 60000.0),
+    "US500":  (2000.0, 8000.0),
     "NAS100": (10000.0, 30000.0),
-    "GER40": (10000.0, 30000.0),
-    "UK100": (6000.0, 12000.0),
-    "JP225": (20000.0, 60000.0),
-    "USOIL": (20.0, 200.0),
-    "UKOIL": (20.0, 200.0),
+    "GER40":  (10000.0, 30000.0),
+    "UK100":  (6000.0, 12000.0),
+    "JP225":  (20000.0, 60000.0),
+    "USOIL":  (20.0, 200.0),
+    "UKOIL":  (20.0, 200.0),
 }
 
 def _preco_valido(symbol: str, price: float) -> bool:
@@ -164,17 +201,17 @@ def extrair_numeros(line: str, min_val: float = 0.0001) -> list:
 
 def pip_size(symbol: str) -> float:
     mapping = {
-        "XAUUSD": 1.0, "XAGUSD": 0.1,
-        "EURUSD": 0.0001, "GBPUSD": 0.0001, "AUDUSD": 0.0001,
-        "NZDUSD": 0.0001, "USDCAD": 0.0001, "USDCHF": 0.0001,
-        "USDJPY": 0.01, "EURJPY": 0.01, "GBPJPY": 0.01,
-        "AUDJPY": 0.01, "CADJPY": 0.01, "CHFJPY": 0.01,
-        "EURGBP": 0.0001, "EURAUD": 0.0001, "EURCAD": 0.0001,
-        "GBPAUD": 0.0001, "GBPCAD": 0.0001, "GBPCHF": 0.0001,
-        "AUDCAD": 0.0001, "AUDNZD": 0.0001, "EURNZD": 0.0001, "GBPNZD": 0.0001,
-        "BTCUSD": 1.0, "ETHUSD": 0.1, "LTCUSD": 0.1, "XRPUSD": 0.0001,
-        "US30": 1.0, "US500": 0.1, "NAS100": 1.0, "GER40": 1.0, "UK100": 1.0,
-        "USOIL": 0.01, "UKOIL": 0.01,
+        "XAUUSD": 1.0,   "XAGUSD": 0.1,
+        "EURUSD": 0.0001,"GBPUSD": 0.0001,"AUDUSD": 0.0001,
+        "NZDUSD": 0.0001,"USDCAD": 0.0001,"USDCHF": 0.0001,
+        "USDJPY": 0.01,  "EURJPY": 0.01,  "GBPJPY": 0.01,
+        "AUDJPY": 0.01,  "CADJPY": 0.01,  "CHFJPY": 0.01,
+        "EURGBP": 0.0001,"EURAUD": 0.0001,"EURCAD": 0.0001,
+        "GBPAUD": 0.0001,"GBPCAD": 0.0001,"GBPCHF": 0.0001,
+        "AUDCAD": 0.0001,"AUDNZD": 0.0001,"EURNZD": 0.0001,"GBPNZD": 0.0001,
+        "BTCUSD": 1.0,   "ETHUSD": 0.1,   "LTCUSD": 0.1,"XRPUSD": 0.0001,
+        "US30":   1.0,   "US500":  0.1,   "NAS100": 1.0,"GER40":  1.0,"UK100": 1.0,
+        "USOIL":  0.01,  "UKOIL":  0.01,
     }
     return mapping.get(symbol, 0.0001)
 
@@ -252,13 +289,9 @@ def parse_signal(text: str) -> Optional[dict]:
 
     if not entry:
         m = re.search(
-            r"(?:"
-            r"TRADING\s+ON"
-            r"|PRICE\s+IS(?:\s+AT)?"
-            r"|PIVOT\s+LEVEL\s+"
+            r"(?:TRADING\s+ON|PRICE\s+IS(?:\s+AT)?|PIVOT\s+LEVEL\s+"
             r"|TESTS?\s+(?:AN?\s+)?(?:IMPORTANT\s+)?(?:PSYCHOLOGICAL\s+)?LEVEL"
-            r"|INSTRUMENT\s+TESTS?"
-            r")\s*(\d+(?:\.\d+)?)",
+            r"|INSTRUMENT\s+TESTS?)\s*(\d+(?:\.\d+)?)",
             full_text_up
         )
         if m:
@@ -269,9 +302,7 @@ def parse_signal(text: str) -> Optional[dict]:
             up_line = line.upper()
             if re.search(
                 r"TESTS?\s+(?:AN?\s+)?(?:IMPORTANT\s+)?(?:PSYCHOLOGICAL\s+)?LEVEL"
-                r"|INSTRUMENT\s+TESTS?"
-                r"|TRADING\s+ON"
-                r"|PIVOT\s+LEVEL",
+                r"|INSTRUMENT\s+TESTS?|TRADING\s+ON|PIVOT\s+LEVEL",
                 up_line
             ):
                 for next_line in lines[idx:idx+3]:
@@ -326,15 +357,11 @@ def parse_signal(text: str) -> Optional[dict]:
     i = 0
     while i < len(lines):
         line = lines[i]
-        up = line.upper()
+        up   = line.upper()
 
         if re.search(
-            r"\bSTOP\s*LOSS\b"
-            r"|\bSL\b"
-            r"|\bSI\b"
-            r"|\bRECOMMENDED\s+STOP\s+LOSS\b"
-            r"|\bMY\s+STOP\s+LOSS\b"
-            r"|\bSTOP\s*[:\-]",
+            r"\bSTOP\s*LOSS\b|\bSL\b|\bSI\b"
+            r"|\bRECOMMENDED\s+STOP\s+LOSS\b|\bMY\s+STOP\s+LOSS\b|\bSTOP\s*[:\-]",
             up
         ):
             nums = [float(n) for n in re.findall(r"\d+\.\d+", line)]
@@ -348,12 +375,7 @@ def parse_signal(text: str) -> Optional[dict]:
                     sl = nx[-1]
 
         elif re.search(
-            r"\bTP\d*\b"
-            r"|\d+TP\b"
-            r"|\bTARGET\b"
-            r"|\bALVO\b"
-            r"|\bTAKE\s*PROFIT\b"
-            r"|\bTARGET\s*[:\-]",
+            r"\bTP\d*\b|\d+TP\b|\bTARGET\b|\bALVO\b|\bTAKE\s*PROFIT\b|\bTARGET\s*[:\-]",
             up
         ):
             is_pips = bool(re.search(r"\dpips?", up, re.IGNORECASE))
@@ -419,15 +441,15 @@ def parse_signal(text: str) -> Optional[dict]:
             return None
 
     parsed = {
-        "id": str(uuid.uuid4()),
+        "id":     str(uuid.uuid4()),
         "symbol": symbol,
-        "type": trade_type,
-        "entry": entry,
-        "sl": sl or 0.0,
-        "tps": tps_validos[:4],
+        "type":   trade_type,
+        "entry":  entry,
+        "sl":     sl or 0.0,
+        "tps":    tps_validos[:4],
         "source": "Telegram",
-        "raw": text_clean[:300],
-        "time": datetime.now(timezone.utc).isoformat(),
+        "raw":    text_clean[:300],
+        "time":   datetime.now(timezone.utc).isoformat(),
         "status": "pending",
     }
 
@@ -451,9 +473,9 @@ def registrar_listener():
             log.debug("Final de semana — mensagem ignorada")
             return
 
-        chat = await event.get_chat()
+        chat  = await event.get_chat()
         texto = event.raw_text or ""
-        nome = getattr(chat, "title", str(event.chat_id))
+        nome  = getattr(chat, "title", str(event.chat_id))
         log.info(f"Mensagem recebida | Grupo: {nome} ({event.chat_id}) | Texto: {texto[:80]}")
 
         if not event.is_group and not event.is_channel:
@@ -466,11 +488,26 @@ def registrar_listener():
 
         sinal["source"] = nome
         signal_queue.append(sinal)
+
         log.info(
             f"Sinal enfileirado: {sinal['id']} | "
             f"{sinal['type']} {sinal['symbol']} @ {sinal['entry']} | "
             f"{len(sinal['tps'])} TPs | SL: {sinal['sl']}"
         )
+
+        # ── Notificação Telegram: sinal recebido na fila ──────────────────────
+        emoji = "🟢" if sinal["type"] == "BUY" else "🔴"
+        msg = (
+            f"{emoji} <b>{sinal['type']}  •  {sinal['symbol']}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📥 <b>Sinal recebido na fila</b>\n"
+            f"💲 Entry: <code>{sinal['entry']}</code>\n"
+            f"🛡 Stop Loss: <code>{sinal['sl']}</code>\n"
+            f"🎯 TPs: <code>{_fmt_tps(sinal['tps'])}</code>\n"
+            f"📡 Grupo: {nome}\n"
+            f"⏱ {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
+        )
+        await enviar_telegram(msg)
 
 # =============================================================================
 # STARTUP / SHUTDOWN
@@ -488,6 +525,14 @@ async def startup():
 
         registrar_listener()
         log.info(f"Listener ativo | Grupos monitorados: {SIGNAL_GROUPS or 'TODOS'}")
+
+        await enviar_telegram(
+            "🤖 <b>TS Signal Bridge v2.7.0</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "✅ API iniciada com sucesso\n"
+            f"📡 Grupos monitorados: {SIGNAL_GROUPS or 'TODOS'}\n"
+            f"⏱ {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
+        )
     except Exception as e:
         log.error(f"Erro no startup: {e}")
 
@@ -496,6 +541,11 @@ async def shutdown():
     if client.is_connected():
         await client.disconnect()
         log.info("Telegram desconectado")
+    await enviar_telegram(
+        "🔴 <b>TS Signal Bridge</b>\n"
+        "⏹ API encerrada\n"
+        f"⏱ {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
+    )
 
 # =============================================================================
 # ENDPOINTS — MT5
@@ -507,12 +557,12 @@ def check_token(authorization: str):
 @app.get("/health")
 async def health():
     return {
-        "status": "online",
-        "telegram": client.is_connected(),
-        "sinais_fila": len(signal_queue),
-        "sinais_total": len(signal_history),
-        "grupos": SIGNAL_GROUPS,
-        "time": datetime.now(timezone.utc).isoformat(),
+        "status":        "online",
+        "telegram":      client.is_connected(),
+        "sinais_fila":   len(signal_queue),
+        "sinais_total":  len(signal_history),
+        "grupos":        SIGNAL_GROUPS,
+        "time":          datetime.now(timezone.utc).isoformat(),
     }
 
 @app.get("/signal/pending")
@@ -521,12 +571,12 @@ async def get_pending(authorization: str = Header(""), symbol: str = ""):
 
     familias = {
         "XAUUSD": {"XAUUSD", "XAGUSD"},
-        "FOREX": {"EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","NZDUSD","USDCAD",
-                  "EURJPY","GBPJPY","EURGBP","EURAUD","EURCAD","GBPAUD","GBPCAD",
-                  "GBPCHF","AUDCAD","AUDJPY","CADJPY","CHFJPY","AUDNZD","EURNZD","GBPNZD"},
-        "INDEX": {"US30","US500","NAS100","GER40","UK100","JP225"},
+        "FOREX":  {"EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","NZDUSD","USDCAD",
+                   "EURJPY","GBPJPY","EURGBP","EURAUD","EURCAD","GBPAUD","GBPCAD",
+                   "GBPCHF","AUDCAD","AUDJPY","CADJPY","CHFJPY","AUDNZD","EURNZD","GBPNZD"},
+        "INDEX":  {"US30","US500","NAS100","GER40","UK100","JP225"},
         "CRYPTO": {"BTCUSD","ETHUSD","LTCUSD","XRPUSD"},
-        "OIL": {"USOIL","UKOIL"},
+        "OIL":    {"USOIL","UKOIL"},
     }
 
     if not symbol:
@@ -536,7 +586,7 @@ async def get_pending(authorization: str = Header(""), symbol: str = ""):
         return JSONResponse(status_code=200, content=signal_queue[0])
 
     sym_upper = symbol.upper()
-    aceitos = familias.get(sym_upper, {sym_upper})
+    aceitos   = familias.get(sym_upper, {sym_upper})
 
     sinal = next((s for s in signal_queue if s.get("symbol", "") in aceitos), None)
     if not sinal:
@@ -553,29 +603,47 @@ async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
         sinal_hist = next((s for s in signal_history if s["id"] == body.id), None)
         if sinal_hist:
             return {"ok": True, "id": body.id, "status": "already_confirmed"}
-
-        sinal = {
-            "id": body.id,
-            "symbol": "?",
-            "type": "?",
-            "entry": 0,
-            "tps": [],
-            "sl": 0,
-            "source": "MT5",
-        }
+        sinal = {"id": body.id, "symbol": "?", "type": "?", "entry": 0, "tps": [], "sl": 0, "source": "MT5"}
 
     if sinal in signal_queue:
         signal_queue.remove(sinal)
 
     sinal.update({
-        "status": body.status,
-        "mt5_msg": body.message,
-        "account": body.account,
+        "status":   body.status,
+        "mt5_msg":  body.message,
+        "account":  body.account,
         "executed": datetime.now(timezone.utc).isoformat(),
     })
     signal_history.append(sinal)
 
     log.info(f"Confirmação MT5: {body.id} | {body.status} | {body.message}")
+
+    # ── Notificação Telegram: confirmação do MT5 ──────────────────────────────
+    if body.status == "executed":
+        emoji = "🟢" if sinal.get("type") == "BUY" else "🔴"
+        msg = (
+            f"{emoji} <b>{sinal.get('type')}  •  {sinal.get('symbol')}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ <b>Ordem aberta no MT5</b>\n"
+            f"💲 Entry: <code>{sinal.get('entry')}</code>\n"
+            f"🛡 Stop Loss: <code>{sinal.get('sl')}</code>\n"
+            f"🎯 TPs: <code>{_fmt_tps(sinal.get('tps', []))}</code>\n"
+            f"🏦 Conta: <code>{body.account}</code>\n"
+            f"📋 {body.message}\n"
+            f"⏱ {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
+        )
+        await enviar_telegram(msg)
+    elif body.status == "failed":
+        msg = (
+            f"⚠️ <b>Falha ao abrir ordem — {sinal.get('symbol')}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"❌ Status: <code>failed</code>\n"
+            f"📋 Motivo: {body.message}\n"
+            f"🏦 Conta: <code>{body.account}</code>\n"
+            f"⏱ {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
+        )
+        await enviar_telegram(msg)
+
     return {"ok": True, "id": body.id, "status": body.status}
 
 @app.get("/signals/queue")
@@ -597,15 +665,12 @@ async def clear_queue(authorization: str = Header("")):
 @app.post("/signal/test")
 async def test_signal(request_body: dict, authorization: str = Header("")):
     check_token(authorization)
-
     text = request_body.get("text", "")
     if not text:
         raise HTTPException(status_code=400, detail="Campo 'text' obrigatório")
-
     sinal = parse_signal(text)
     if not sinal:
         raise HTTPException(status_code=422, detail="Texto não reconhecido como sinal")
-
     sinal["source"] = "Teste Manual"
     signal_queue.append(sinal)
     return {"ok": True, "signal": sinal}
@@ -615,7 +680,6 @@ async def list_groups(authorization: str = Header("")):
     check_token(authorization)
     if not client.is_connected():
         raise HTTPException(status_code=503, detail="Telegram não conectado")
-
     dialogs = await client.get_dialogs()
     groups = [
         {"id": d.id, "name": d.name, "type": str(type(d.entity).__name__)}
@@ -628,6 +692,5 @@ async def get_messages(group_id: int, limit: int = 20, authorization: str = Head
     check_token(authorization)
     if not client.is_connected():
         raise HTTPException(status_code=503, detail="Telegram não conectado")
-
     msgs = await client.get_messages(group_id, limit=limit)
     return {"messages": [{"id": m.id, "text": m.text, "date": str(m.date)} for m in msgs]}
