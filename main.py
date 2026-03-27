@@ -601,11 +601,17 @@ async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
     check_token(authorization)
 
     sinal = next((s for s in signal_queue if s["id"] == body.id), None)
+
+    # Já confirmado antes → responde OK sem processar de novo
     if not sinal:
         sinal_hist = next((s for s in signal_history if s["id"] == body.id), None)
         if sinal_hist:
             return {"ok": True, "id": body.id, "status": "already_confirmed"}
-        sinal = {"id": body.id, "symbol": "?", "type": "?", "entry": 0, "tps": [], "sl": 0, "source": "MT5"}
+        
+        # ID desconhecido (ignored por EA diferente) → aceita silenciosamente
+        # SEM retornar erro, para não travar o loop do MT5
+        log.info(f"Confirmação ignorada (ID não encontrado na fila): {body.id} | {body.status}")
+        return {"ok": True, "id": body.id, "status": "not_found_ignored"}
 
     if sinal in signal_queue:
         signal_queue.remove(sinal)
@@ -620,7 +626,7 @@ async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
 
     log.info(f"Confirmação MT5: {body.id} | {body.status} | {body.message}")
 
-    # ── Notificação Telegram: confirmação do MT5 ──────────────────────────────
+    # Notificação apenas para executed/failed, não para ignored
     if body.status == "executed":
         emoji = "🟢" if sinal.get("type") == "BUY" else "🔴"
         msg = (
