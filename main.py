@@ -602,15 +602,14 @@ async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
 
     sinal = next((s for s in signal_queue if s["id"] == body.id), None)
 
-    # Já confirmado antes → responde OK sem processar de novo
     if not sinal:
         sinal_hist = next((s for s in signal_history if s["id"] == body.id), None)
         if sinal_hist:
             return {"ok": True, "id": body.id, "status": "already_confirmed"}
-        
-        # ID desconhecido (ignored por EA diferente) → aceita silenciosamente
-        # SEM retornar erro, para não travar o loop do MT5
-        log.info(f"Confirmação ignorada (ID não encontrado na fila): {body.id} | {body.status}")
+
+        # ID desconhecido (ex: ignored por EA de outro par) → remove da fila e aceita sem erro
+        log.info(f"Confirmação de EA diferente: {body.id} | {body.status} — removendo da fila se existir")
+        signal_queue[:] = [s for s in signal_queue if s["id"] != body.id]
         return {"ok": True, "id": body.id, "status": "not_found_ignored"}
 
     if sinal in signal_queue:
@@ -626,7 +625,6 @@ async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
 
     log.info(f"Confirmação MT5: {body.id} | {body.status} | {body.message}")
 
-    # Notificação apenas para executed/failed, não para ignored
     if body.status == "executed":
         emoji = "🟢" if sinal.get("type") == "BUY" else "🔴"
         msg = (
