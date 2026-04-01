@@ -20,10 +20,6 @@ PHONE    = os.environ["PHONE"]
 SECRET_KEY = os.environ.get("API_KEY", "chave-secreta")
 
 # ── Bot Telegram para notificações ───────────────────────────────────────────
-# Configure essas duas variáveis no Railway (Settings > Variables):
-#   TG_NOTIFY_TOKEN  → token do bot  (ex: 7412345678:AAFxxxxx)
-#   TG_NOTIFY_CHATID → chat_id do destino (ex: -1001234567890 para grupo/canal
-#                       ou 123456789 para DM)
 TG_NOTIFY_TOKEN  = os.environ.get("NOTIF_KEY", "")
 TG_NOTIFY_CHATID = os.environ.get("NOTIF_CHAT", "")
 
@@ -42,7 +38,7 @@ signal_queue:   list[dict] = []
 signal_history: list[dict] = []
 
 # ── app ───────────────────────────────────────────────────────────────────────
-app = FastAPI(title="TS Signal Bridge", version="2.7.0")
+app = FastAPI(title="TS Signal Bridge", version="2.7.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -58,10 +54,9 @@ class ConfirmRequest(BaseModel):
     account: Optional[str] = ""
 
 # =============================================================================
-# NOTIFICAÇÃO TELEGRAM (substitui WhatsApp)
+# NOTIFICAÇÃO TELEGRAM
 # =============================================================================
 async def enviar_telegram(mensagem: str) -> None:
-    """Envia mensagem via Bot API do Telegram (parse_mode=HTML)."""
     if not TG_NOTIFY_TOKEN or not TG_NOTIFY_CHATID:
         log.warning("TG_NOTIFY_TOKEN ou TG_NOTIFY_CHATID não configurados — notificação ignorada")
         return
@@ -497,7 +492,6 @@ def registrar_listener():
             f"{len(sinal['tps'])} TPs | SL: {sinal['sl']}"
         )
 
-        # ── Notificação Telegram: sinal recebido na fila ──────────────────────
         emoji = "🟢" if sinal["type"] == "BUY" else "🔴"
         msg = (
             f"{emoji} <b>{sinal['type']}  •  {sinal['symbol']}</b>\n"
@@ -529,7 +523,7 @@ async def startup():
         log.info(f"Listener ativo | Grupos monitorados: {SIGNAL_GROUPS or 'TODOS'}")
 
         await enviar_telegram(
-            "🤖 <b>TS Signal Bridge v2.7.0</b>\n"
+            "🤖 <b>TS Signal Bridge v2.7.1</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             "✅ API iniciada com sucesso\n"
             f"📡 Grupos monitorados: {SIGNAL_GROUPS or 'TODOS'}\n"
@@ -596,61 +590,74 @@ async def get_pending(authorization: str = Header(""), symbol: str = ""):
         return Response(status_code=204)
     return JSONResponse(status_code=200, content=sinal)
 
+# =============================================================================
+# CORREÇÃO PRINCIPAL: /signal/confirm sempre retorna 200
+# IDs desconhecidos são aceitos silenciosamente — o sinal foi removido por
+# outro EA ou já expirou. Retornar 400 causava loop infinito nos EAs.
+# =============================================================================
 @app.post("/signal/confirm")
 async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
     check_token(authorization)
 
-    sinal = next((s for s in signal_queue if s["id"] == body.id), None)
+    try:
+        sinal = next((s for s in signal_queue if s["id"] == body.id), None)
 
-    if not sinal:
-        sinal_hist = next((s for s in signal_history if s["id"] == body.id), None)
-        if sinal_hist:
-            return {"ok": True, "id": body.id, "status": "already_confirmed"}
+        # Já estava no histórico (confirmação duplicada)
+        if not sinal:
+            sinal_hist = next((s for s in signal_history if s["id"] == body.id), None)
+            if sinal_hist:
+                log.info(f"Confirmação duplicada ignorada: {body.id}")
+                return {"ok": True, "id": body.id, "status": "already_confirmed"}
 
-        # ID desconhecido (ex: ignored por EA de outro par) → remove da fila e aceita sem erro
-        log.info(f"Confirmação de EA diferente: {body.id} | {body.status} — removendo da fila se existir")
-        signal_queue[:] = [s for s in signal_queue if s["id"] != body.id]
-        return {"ok": True, "id": body.id, "status": "not_found_ignored"}
+        # ID desconhecido — sinal removido por outro EA ou nunca existiu
+        # IMPORTANTE: retorna 200 para evitar loop no EA
+        if not sinal:
+            log.info(f"Confirmação de ID desconhecido: {body.id} | {body.status} — aceito sem erro")
+            return {"ok": True, "id": body.id, "status": "not_found_ignored"}
 
-    if sinal in signal_queue:
+        # Remover da fila e mover para histórico
         signal_queue.remove(sinal)
+        sinal.update({
+            "status":   body.status,
+            "mt5_msg":  body.message,
+            "account":  body.account,
+            "executed": datetime.now(timezone.utc).isoformat(),
+        })
+        signal_history.append(sinal)
 
-    sinal.update({
-        "status":   body.status,
-        "mt5_msg":  body.message,
-        "account":  body.account,
-        "executed": datetime.now(timezone.utc).isoformat(),
-    })
-    signal_history.append(sinal)
+        log.info(f"Confirmação MT5: {body.id} | {body.status} | {body.message}")
 
-    log.info(f"Confirmação MT5: {body.id} | {body.status} | {body.message}")
+        if body.status == "executed":
+            emoji = "🟢" if sinal.get("type") == "BUY" else "🔴"
+            msg = (
+                f"{emoji} <b>{sinal.get('type')}  •  {sinal.get('symbol')}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"✅ <b>Ordem aberta no MT5</b>\n"
+                f"💲 Entry: <code>{sinal.get('entry')}</code>\n"
+                f"🛡 Stop Loss: <code>{sinal.get('sl')}</code>\n"
+                f"🎯 TPs: <code>{_fmt_tps(sinal.get('tps', []))}</code>\n"
+                f"🏦 Conta: <code>{body.account}</code>\n"
+                f"📋 {body.message}\n"
+                f"⏱ {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
+            )
+            await enviar_telegram(msg)
+        elif body.status == "failed":
+            msg = (
+                f"⚠️ <b>Falha ao abrir ordem — {sinal.get('symbol')}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"❌ Status: <code>failed</code>\n"
+                f"📋 Motivo: {body.message}\n"
+                f"🏦 Conta: <code>{body.account}</code>\n"
+                f"⏱ {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
+            )
+            await enviar_telegram(msg)
 
-    if body.status == "executed":
-        emoji = "🟢" if sinal.get("type") == "BUY" else "🔴"
-        msg = (
-            f"{emoji} <b>{sinal.get('type')}  •  {sinal.get('symbol')}</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"✅ <b>Ordem aberta no MT5</b>\n"
-            f"💲 Entry: <code>{sinal.get('entry')}</code>\n"
-            f"🛡 Stop Loss: <code>{sinal.get('sl')}</code>\n"
-            f"🎯 TPs: <code>{_fmt_tps(sinal.get('tps', []))}</code>\n"
-            f"🏦 Conta: <code>{body.account}</code>\n"
-            f"📋 {body.message}\n"
-            f"⏱ {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
-        )
-        await enviar_telegram(msg)
-    elif body.status == "failed":
-        msg = (
-            f"⚠️ <b>Falha ao abrir ordem — {sinal.get('symbol')}</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"❌ Status: <code>failed</code>\n"
-            f"📋 Motivo: {body.message}\n"
-            f"🏦 Conta: <code>{body.account}</code>\n"
-            f"⏱ {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
-        )
-        await enviar_telegram(msg)
+        return {"ok": True, "id": body.id, "status": body.status}
 
-    return {"ok": True, "id": body.id, "status": body.status}
+    except Exception as e:
+        # Nunca retorna 500 para o EA — loga o erro e responde 200
+        log.error(f"Erro inesperado em /signal/confirm: {e} | id={body.id}")
+        return {"ok": True, "id": body.id, "status": "error_ignored"}
 
 @app.get("/signals/queue")
 async def get_queue(authorization: str = Header("")):
