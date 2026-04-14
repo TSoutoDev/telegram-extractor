@@ -268,16 +268,16 @@ def parse_signal(text: str) -> Optional[dict]:
             entry_min, entry_max = min(v1, v2), max(v1, v2)
             entry = entry_min if trade_type == "BUY" else entry_max
 
-    if not entry:
-        for line in lines:
-            h = re.sub(r"[^\w\s/\.\-]", " ", line.upper())
-            m = re.search(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", h)
-            if m:
-                v1, v2 = float(m.group(1)), float(m.group(2))
-                if v1 > 100 and v2 > 100:
-                    entry_min, entry_max = min(v1, v2), max(v1, v2)
-                    entry = entry_max
-                    break
+   if not entry:
+    for line in lines:
+        h = re.sub(r"[^\w\s/\.\-]", " ", line.upper())
+        m = re.search(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", h)
+        if m:
+            v1, v2 = float(m.group(1)), float(m.group(2))
+            if v1 > 100 and v2 > 100:
+                entry_min, entry_max = min(v1, v2), max(v1, v2)
+                entry = entry_min if trade_type == "BUY" else entry_max  # ← consistente
+                break
 
     if not entry:
         m = re.search(r"@\s*(\d+(?:\.\d+)?)", full_text_up)
