@@ -31,3 +31,10 @@ Thumbs.db
 
 # ── Railway ─────────────────────────────────────────────────────────
 .railway/
+
+# ── Signal Bridge local ─────────────────────────────────────────────
+signal_bridge.pid
+
+# Arquivos acidentais criados no terminal
+curl
+python

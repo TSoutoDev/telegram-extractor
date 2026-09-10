@@ -8,17 +8,117 @@ from typing import Optional
 import os, re, uuid, logging, json
 import urllib.request, urllib.parse
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine, text
 
 # ── logging ───────────────────────────────────────────────────────────────────
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+LOG_DIR = "logs"
+os.makedirs(LOG_DIR, exist_ok=True)
+
+LOG_FILE = os.path.join(LOG_DIR, "signal_bridge.log")
+
+formatter = logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(message)s"
+)
+
+file_handler = RotatingFileHandler(
+    LOG_FILE,
+    maxBytes=5 * 1024 * 1024,
+    backupCount=2,
+    encoding="utf-8"
+)
+
+file_handler.setFormatter(formatter)
+
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(formatter)
+
+logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler])
+
 log = logging.getLogger(__name__)
+
+load_dotenv(override=True)
 
 # ── variáveis de ambiente ─────────────────────────────────────────────────────
 API_ID   = os.environ["API_ID"]
 API_HASH = os.environ["API_HASH"]
 PHONE    = os.environ["PHONE"]
 SECRET_KEY = os.environ.get("API_KEY", "chave-secreta")
+DATABASE_URL = os.environ["DATABASE_URL"]
+SIGNAL_MAX_AGE_SECONDS = int(os.getenv("SIGNAL_MAX_AGE_SECONDS", "60"))
 
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+
+def expirar_sinais_antigos():
+    with engine.begin() as conn:
+        conn.execute(
+            text("""
+                UPDATE signals
+                SET status = 'expired'
+                WHERE status = 'pending'
+                  AND expires_at <= NOW()
+            """)
+        )
+
+def salvar_sinal_db(sinal):
+    with engine.begin() as conn:
+        resultado = conn.execute(
+            text("""
+                INSERT INTO signals (
+                    id,
+                    symbol,
+                    type,
+                    entry,
+                    entry_min,
+                    entry_max,
+                    sl,
+                    tps,
+                    source,
+                    telegram_group_id,
+                    telegram_message_id,
+                    received_at,
+                    expires_at,
+                    status
+                )
+                VALUES (
+                    :id,
+                    :symbol,
+                    :type,
+                    :entry,
+                    :entry_min,
+                    :entry_max,
+                    :sl,
+                    CAST(:tps AS jsonb),
+                    :source,
+                    :telegram_group_id,
+                    :telegram_message_id,
+                    NOW(),
+                    NOW() + (:max_age * INTERVAL '1 second'),
+                    'pending'
+                )
+                ON CONFLICT (telegram_group_id, telegram_message_id)
+                DO NOTHING
+            """),
+            {
+                "id": sinal["id"],
+                "symbol": sinal["symbol"],
+                "type": sinal["type"],
+                "entry": sinal["entry"],
+                "entry_min": sinal.get("entry_min"),
+                "entry_max": sinal.get("entry_max"),
+                "sl": sinal.get("sl"),
+                "tps": json.dumps(sinal.get("tps", [])),
+                "source": sinal.get("source"),
+                "telegram_group_id": sinal.get("telegram_group_id"),
+                "telegram_message_id": sinal.get("telegram_message_id"),
+                "max_age": SIGNAL_MAX_AGE_SECONDS,
+            }
+        )
+
+        return resultado.rowcount > 0
+    
 # ── Bot Telegram para notificações ───────────────────────────────────────────
 TG_NOTIFY_TOKEN  = os.environ.get("NOTIF_KEY", "")
 TG_NOTIFY_CHATID = os.environ.get("NOTIF_CHAT", "")
@@ -32,10 +132,6 @@ SIGNAL_GROUPS = [
     for x in os.environ.get("TELEGRAM_SIGNAL_GROUPS", "").split(",")
     if x.strip().lstrip("-").isdigit()
 ]
-
-# ── fila de sinais (em memória) ───────────────────────────────────────────────
-signal_queue:   list[dict] = []
-signal_history: list[dict] = []
 
 # ── app ───────────────────────────────────────────────────────────────────────
 app = FastAPI(title="TS Signal Bridge", version="2.7.1")
@@ -268,16 +364,16 @@ def parse_signal(text: str) -> Optional[dict]:
             entry_min, entry_max = min(v1, v2), max(v1, v2)
             entry = entry_min if trade_type == "BUY" else entry_max
 
-   if not entry:
-    for line in lines:
-        h = re.sub(r"[^\w\s/\.\-]", " ", line.upper())
-        m = re.search(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", h)
-        if m:
-            v1, v2 = float(m.group(1)), float(m.group(2))
-            if v1 > 100 and v2 > 100:
-                entry_min, entry_max = min(v1, v2), max(v1, v2)
-                entry = entry_min if trade_type == "BUY" else entry_max  # ← consistente
-                break
+    if not entry:
+        for line in lines:
+            h = re.sub(r"[^\w\s/\.\-]", " ", line.upper())
+            m = re.search(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", h)
+            if m:
+                v1, v2 = float(m.group(1)), float(m.group(2))
+                if v1 > 100 and v2 > 100:
+                    entry_min, entry_max = min(v1, v2), max(v1, v2)
+                    entry = entry_min if trade_type == "BUY" else entry_max
+                    break
 
     if not entry:
         m = re.search(r"@\s*(\d+(?:\.\d+)?)", full_text_up)
@@ -464,35 +560,96 @@ def parse_signal(text: str) -> Optional[dict]:
 # LISTENER DO TELETHON
 # =============================================================================
 def registrar_listener():
-    @client.on(events.NewMessage(chats=SIGNAL_GROUPS if SIGNAL_GROUPS else None, incoming=True, outgoing=True))
+    @client.on(
+        events.NewMessage(
+            chats=SIGNAL_GROUPS if SIGNAL_GROUPS else None,
+            incoming=True,
+            outgoing=True
+        )
+    )
     async def handler(event):
+
         if e_final_de_semana():
             log.debug("Final de semana — mensagem ignorada")
             return
 
-        chat  = await event.get_chat()
-        texto = event.raw_text or ""
-        nome  = getattr(chat, "title", str(event.chat_id))
-        log.info(f"Mensagem recebida | Grupo: {nome} ({event.chat_id}) | Texto: {texto[:80]}")
+        # ---------------------------------------------------------------------
+        # PROTEÇÃO CONTRA MENSAGEM ANTIGA DO TELEGRAM
+        # ---------------------------------------------------------------------
+        data_mensagem = event.message.date
 
+        if data_mensagem.tzinfo is None:
+            data_mensagem = data_mensagem.replace(tzinfo=timezone.utc)
+
+        agora = datetime.now(timezone.utc)
+        idade_segundos = (agora - data_mensagem).total_seconds()
+
+        if idade_segundos > SIGNAL_MAX_AGE_SECONDS:
+            log.info(
+                f"Mensagem antiga ignorada | "
+                f"Idade: {idade_segundos:.1f}s | "
+                f"Telegram: {data_mensagem.isoformat()}"
+            )
+            return
+
+        # ---------------------------------------------------------------------
+        # DADOS DA MENSAGEM
+        # ---------------------------------------------------------------------
+        chat = await event.get_chat()
+        texto = event.raw_text or ""
+        nome = getattr(chat, "title", str(event.chat_id))
+
+        log.info(
+            f"Mensagem recebida | Grupo: {nome} ({event.chat_id}) | "
+            f"Idade: {idade_segundos:.1f}s | "
+            f"Texto: {texto[:80]}"
+        )
+
+        # Ignora mensagens que não sejam de grupo/canal
         if not event.is_group and not event.is_channel:
             return
 
+        # ---------------------------------------------------------------------
+        # PARSER DO SINAL
+        # ---------------------------------------------------------------------
         sinal = parse_signal(texto)
+
         if not sinal:
             log.info("Mensagem não reconhecida como sinal — ignorada")
             return
 
+        # ---------------------------------------------------------------------
+        # IDENTIFICAÇÃO DO TELEGRAM
+        # ---------------------------------------------------------------------
         sinal["source"] = nome
-        signal_queue.append(sinal)
+        sinal["telegram_group_id"] = event.chat_id
+        sinal["telegram_message_id"] = event.message.id
+
+        # ---------------------------------------------------------------------
+        # SALVAR NO POSTGRESQL
+        # ---------------------------------------------------------------------
+        salvo = salvar_sinal_db(sinal)
+
+        if not salvo:
+            log.info(
+                f"Mensagem duplicada ignorada | "
+                f"Grupo: {event.chat_id} | "
+                f"Mensagem: {event.message.id}"
+            )
+            return
 
         log.info(
-            f"Sinal enfileirado: {sinal['id']} | "
+            f"Sinal salvo no banco: {sinal['id']} | "
             f"{sinal['type']} {sinal['symbol']} @ {sinal['entry']} | "
-            f"{len(sinal['tps'])} TPs | SL: {sinal['sl']}"
+            f"{len(sinal['tps'])} TPs | "
+            f"SL: {sinal['sl']}"
         )
 
+        # ---------------------------------------------------------------------
+        # NOTIFICAÇÃO TELEGRAM
+        # ---------------------------------------------------------------------
         emoji = "🟢" if sinal["type"] == "BUY" else "🔴"
+
         msg = (
             f"{emoji} <b>{sinal['type']}  •  {sinal['symbol']}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -503,6 +660,7 @@ def registrar_listener():
             f"📡 Grupo: {nome}\n"
             f"⏱ {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
         )
+
         await enviar_telegram(msg)
 
 # =============================================================================
@@ -517,7 +675,7 @@ async def startup():
                 password=os.environ.get("TELEGRAM_PASSWORD")
             )
             session_str = client.session.save()
-            log.info(f"Conectado ao Telegram | SESSION_STRING={session_str}")
+            log.info("Conectado ao Telegram com sucesso")
 
         registrar_listener()
         log.info(f"Listener ativo | Grupos monitorados: {SIGNAL_GROUPS or 'TODOS'}")
@@ -552,13 +710,29 @@ def check_token(authorization: str):
 
 @app.get("/health")
 async def health():
+    expirar_sinais_antigos()
+
+    with engine.begin() as conn:
+        pendentes = conn.execute(
+            text("""
+                SELECT COUNT(*)
+                FROM signals
+                WHERE status = 'pending'
+                  AND expires_at > NOW()
+            """)
+        ).scalar()
+
+        total = conn.execute(
+            text("SELECT COUNT(*) FROM signals")
+        ).scalar()
+
     return {
-        "status":        "online",
-        "telegram":      client.is_connected(),
-        "sinais_fila":   len(signal_queue),
-        "sinais_total":  len(signal_history),
-        "grupos":        SIGNAL_GROUPS,
-        "time":          datetime.now(timezone.utc).isoformat(),
+        "status": "online",
+        "telegram": client.is_connected(),
+        "sinais_fila": pendentes,
+        "sinais_total": total,
+        "grupos": SIGNAL_GROUPS,
+        "time": datetime.now(timezone.utc).isoformat(),
     }
 
 @app.get("/signal/pending")
@@ -566,30 +740,98 @@ async def get_pending(authorization: str = Header(""), symbol: str = ""):
     check_token(authorization)
 
     familias = {
-        "XAUUSD": {"XAUUSD", "XAGUSD"},
-        "FOREX":  {"EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","NZDUSD","USDCAD",
-                   "EURJPY","GBPJPY","EURGBP","EURAUD","EURCAD","GBPAUD","GBPCAD",
-                   "GBPCHF","AUDCAD","AUDJPY","CADJPY","CHFJPY","AUDNZD","EURNZD","GBPNZD"},
-        "INDEX":  {"US30","US500","NAS100","GER40","UK100","JP225"},
-        "CRYPTO": {"BTCUSD","ETHUSD","LTCUSD","XRPUSD"},
-        "OIL":    {"USOIL","UKOIL"},
+        "XAUUSD": {"XAUUSD"},
+        "FOREX": {
+            "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "NZDUSD", "USDCAD",
+            "EURJPY", "GBPJPY", "EURGBP", "EURAUD", "EURCAD", "GBPAUD", "GBPCAD",
+            "GBPCHF", "AUDCAD", "AUDJPY", "CADJPY", "CHFJPY", "AUDNZD", "EURNZD",
+            "GBPNZD"
+        },
+        "INDEX": {"US30", "US500", "NAS100", "GER40", "UK100", "JP225"},
+        "CRYPTO": {"BTCUSD", "ETHUSD", "LTCUSD", "XRPUSD"},
+        "OIL": {"USOIL", "UKOIL"},
     }
 
-    if not symbol:
-        if not signal_queue:
-            from fastapi.responses import Response
-            return Response(status_code=204)
-        return JSONResponse(status_code=200, content=signal_queue[0])
+    # Primeiro, qualquer sinal vencido deixa de ser elegível
+    expirar_sinais_antigos()
 
-    sym_upper = symbol.upper()
-    aceitos   = familias.get(sym_upper, {sym_upper})
+    with engine.begin() as conn:
 
-    sinal = next((s for s in signal_queue if s.get("symbol", "") in aceitos), None)
-    if not sinal:
+        if not symbol:
+            resultado = conn.execute(
+                text("""
+                    SELECT
+                        id,
+                        symbol,
+                        type,
+                        entry,
+                        entry_min,
+                        entry_max,
+                        sl,
+                        tps,
+                        source,
+                        received_at,
+                        expires_at,
+                        status
+                    FROM signals
+                    WHERE status = 'pending'
+                      AND expires_at > NOW()
+                    ORDER BY received_at ASC
+                    LIMIT 1
+                """)
+            ).mappings().first()
+
+        else:
+            sym_upper = symbol.upper()
+            aceitos = familias.get(sym_upper, {sym_upper})
+
+            resultado = conn.execute(
+                text("""
+                    SELECT
+                        id,
+                        symbol,
+                        type,
+                        entry,
+                        entry_min,
+                        entry_max,
+                        sl,
+                        tps,
+                        source,
+                        received_at,
+                        expires_at,
+                        status
+                    FROM signals
+                    WHERE status = 'pending'
+                      AND expires_at > NOW()
+                      AND symbol = ANY(:simbolos)
+                    ORDER BY received_at ASC
+                    LIMIT 1
+                """),
+                {
+                    "simbolos": list(aceitos)
+                }
+            ).mappings().first()
+
+    if not resultado:
         from fastapi.responses import Response
         return Response(status_code=204)
-    return JSONResponse(status_code=200, content=sinal)
 
+    sinal = {
+        "id": str(resultado["id"]),
+        "symbol": resultado["symbol"],
+        "type": resultado["type"],
+        "entry": float(resultado["entry"]) if resultado["entry"] is not None else None,
+        "entry_min": float(resultado["entry_min"]) if resultado["entry_min"] is not None else None,
+        "entry_max": float(resultado["entry_max"]) if resultado["entry_max"] is not None else None,
+        "sl": float(resultado["sl"]) if resultado["sl"] is not None else None,
+        "tps": resultado["tps"] or [],
+        "source": resultado["source"],
+        "time": resultado["received_at"].isoformat(),
+        "expires_at": resultado["expires_at"].isoformat(),
+        "status": resultado["status"]
+    }
+
+    return JSONResponse(status_code=200, content=sinal)
 # =============================================================================
 # CORREÇÃO PRINCIPAL: /signal/confirm sempre retorna 200
 # IDs desconhecidos são aceitos silenciosamente — o sinal foi removido por
@@ -600,35 +842,81 @@ async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
     check_token(authorization)
 
     try:
-        sinal = next((s for s in signal_queue if s["id"] == body.id), None)
+        with engine.begin() as conn:
+            sinal = conn.execute(
+                text("""
+                    SELECT
+                        id,
+                        symbol,
+                        type,
+                        entry,
+                        sl,
+                        tps,
+                        source,
+                        status
+                    FROM signals
+                    WHERE id = :id
+                    LIMIT 1
+                """),
+                {"id": body.id}
+            ).mappings().first()
 
-        # Já estava no histórico (confirmação duplicada)
-        if not sinal:
-            sinal_hist = next((s for s in signal_history if s["id"] == body.id), None)
-            if sinal_hist:
-                log.info(f"Confirmação duplicada ignorada: {body.id}")
-                return {"ok": True, "id": body.id, "status": "already_confirmed"}
+            # ID desconhecido
+            if not sinal:
+                log.info(
+                    f"Confirmação de ID desconhecido: {body.id} | "
+                    f"{body.status} — aceito sem erro"
+                )
+                return {
+                    "ok": True,
+                    "id": body.id,
+                    "status": "not_found_ignored"
+                }
 
-        # ID desconhecido — sinal removido por outro EA ou nunca existiu
-        # IMPORTANTE: retorna 200 para evitar loop no EA
-        if not sinal:
-            log.info(f"Confirmação de ID desconhecido: {body.id} | {body.status} — aceito sem erro")
-            return {"ok": True, "id": body.id, "status": "not_found_ignored"}
+            # Confirmação duplicada
+            if sinal["status"] != "pending":
+                log.info(
+                    f"Confirmação duplicada ignorada: {body.id} | "
+                    f"status atual={sinal['status']}"
+                )
+                return {
+                    "ok": True,
+                    "id": body.id,
+                    "status": "already_confirmed"
+                }
 
-        # Remover da fila e mover para histórico
-        signal_queue.remove(sinal)
-        sinal.update({
-            "status":   body.status,
-            "mt5_msg":  body.message,
-            "account":  body.account,
-            "executed": datetime.now(timezone.utc).isoformat(),
-        })
-        signal_history.append(sinal)
+            # Atualiza o sinal
+            conn.execute(
+            text("""
+                UPDATE signals
+                SET
+                    status = :status,
+                    executed_at = CASE
+                        WHEN :status = 'executed' THEN NOW()
+                        ELSE executed_at
+                    END,
+                    execution_message = :message,
+                    account = :account
+                WHERE id = :id
+                AND status = 'pending'
+            """),
+            {
+                "id": body.id,
+                "status": body.status,
+                "message": body.message,
+                "account": str(body.account) if body.account is not None else None
+            }
+        )
 
-        log.info(f"Confirmação MT5: {body.id} | {body.status} | {body.message}")
+        log.info(
+            f"Confirmação MT5: {body.id} | "
+            f"{body.status} | {body.message}"
+        )
 
+        # Notificações
         if body.status == "executed":
             emoji = "🟢" if sinal.get("type") == "BUY" else "🔴"
+
             msg = (
                 f"{emoji} <b>{sinal.get('type')}  •  {sinal.get('symbol')}</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -640,7 +928,9 @@ async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
                 f"📋 {body.message}\n"
                 f"⏱ {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
             )
+
             await enviar_telegram(msg)
+
         elif body.status == "failed":
             msg = (
                 f"⚠️ <b>Falha ao abrir ordem — {sinal.get('symbol')}</b>\n"
@@ -650,43 +940,186 @@ async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
                 f"🏦 Conta: <code>{body.account}</code>\n"
                 f"⏱ {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
             )
+
             await enviar_telegram(msg)
 
-        return {"ok": True, "id": body.id, "status": body.status}
+        return {
+            "ok": True,
+            "id": body.id,
+            "status": body.status
+        }
 
     except Exception as e:
-        # Nunca retorna 500 para o EA — loga o erro e responde 200
-        log.error(f"Erro inesperado em /signal/confirm: {e} | id={body.id}")
-        return {"ok": True, "id": body.id, "status": "error_ignored"}
+        # Mantém a regra original:
+        # nunca retornar 500 para o EA.
+        log.exception(
+            f"Erro inesperado em /signal/confirm | id={body.id}"
+        )
 
+        return {
+            "ok": True,
+            "id": body.id,
+            "status": "error_ignored"
+        }
+    
 @app.get("/signals/queue")
 async def get_queue(authorization: str = Header("")):
     check_token(authorization)
-    return {"queue": signal_queue, "count": len(signal_queue)}
+
+    expirar_sinais_antigos()
+
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT
+                    id,
+                    symbol,
+                    type,
+                    entry,
+                    entry_min,
+                    entry_max,
+                    sl,
+                    tps,
+                    source,
+                    received_at,
+                    expires_at,
+                    status
+                FROM signals
+                WHERE status = 'pending'
+                  AND expires_at > NOW()
+                ORDER BY received_at ASC
+            """)
+        ).mappings().all()
+
+    sinais = []
+
+    for r in rows:
+        sinais.append({
+            "id": str(r["id"]),
+            "symbol": r["symbol"],
+            "type": r["type"],
+            "entry": float(r["entry"]) if r["entry"] is not None else None,
+            "entry_min": float(r["entry_min"]) if r["entry_min"] is not None else None,
+            "entry_max": float(r["entry_max"]) if r["entry_max"] is not None else None,
+            "sl": float(r["sl"]) if r["sl"] is not None else None,
+            "tps": r["tps"] or [],
+            "source": r["source"],
+            "time": r["received_at"].isoformat(),
+            "expires_at": r["expires_at"].isoformat(),
+            "status": r["status"],
+        })
+
+    return {
+        "queue": sinais,
+        "count": len(sinais)
+    }
 
 @app.get("/signals/history")
 async def get_history(authorization: str = Header("")):
     check_token(authorization)
-    return {"signals": signal_history[-50:], "total": len(signal_history)}
+
+    expirar_sinais_antigos()
+
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT
+                    id,
+                    symbol,
+                    type,
+                    entry,
+                    entry_min,
+                    entry_max,
+                    sl,
+                    tps,
+                    source,
+                    received_at,
+                    expires_at,
+                    status,
+                    executed_at,
+                    execution_message,
+                    account
+                FROM signals
+                ORDER BY received_at DESC
+                LIMIT 50
+            """)
+        ).mappings().all()
+
+        total = conn.execute(
+            text("SELECT COUNT(*) FROM signals")
+        ).scalar()
+
+    sinais = []
+
+    for r in rows:
+        sinais.append({
+            "id": str(r["id"]),
+            "symbol": r["symbol"],
+            "type": r["type"],
+            "entry": float(r["entry"]) if r["entry"] is not None else None,
+            "entry_min": float(r["entry_min"]) if r["entry_min"] is not None else None,
+            "entry_max": float(r["entry_max"]) if r["entry_max"] is not None else None,
+            "sl": float(r["sl"]) if r["sl"] is not None else None,
+            "tps": r["tps"] or [],
+            "source": r["source"],
+            "received_at": r["received_at"].isoformat(),
+            "expires_at": r["expires_at"].isoformat(),
+            "status": r["status"],
+            "executed_at": r["executed_at"].isoformat() if r["executed_at"] else None,
+            "execution_message": r["execution_message"],
+            "account": r["account"],
+        })
+
+    return {
+        "signals": sinais,
+        "total": total
+    }
 
 @app.delete("/signals/queue")
 async def clear_queue(authorization: str = Header("")):
     check_token(authorization)
-    signal_queue.clear()
-    return {"ok": True}
 
+    with engine.begin() as conn:
+        resultado = conn.execute(
+            text("""
+                UPDATE signals
+                SET status = 'cancelled'
+                WHERE status = 'pending'
+            """)
+        )
+
+    return {
+        "ok": True,
+        "cancelled": resultado.rowcount
+    }
 @app.post("/signal/test")
 async def test_signal(request_body: dict, authorization: str = Header("")):
     check_token(authorization)
-    text = request_body.get("text", "")
-    if not text:
-        raise HTTPException(status_code=400, detail="Campo 'text' obrigatório")
-    sinal = parse_signal(text)
+
+    texto = request_body.get("text", "")
+
+    if not texto:
+        raise HTTPException(
+            status_code=400,
+            detail="Campo 'text' obrigatório"
+        )
+
+    sinal = parse_signal(texto)
+
     if not sinal:
-        raise HTTPException(status_code=422, detail="Texto não reconhecido como sinal")
+        raise HTTPException(
+            status_code=422,
+            detail="Texto não reconhecido como sinal"
+        )
+
     sinal["source"] = "Teste Manual"
-    signal_queue.append(sinal)
-    return {"ok": True, "signal": sinal}
+
+    salvar_sinal_db(sinal)
+
+    return {
+        "ok": True,
+        "signal": sinal
+    }
 
 @app.get("/groups")
 async def list_groups(authorization: str = Header("")):
