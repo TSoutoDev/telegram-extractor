@@ -149,6 +149,17 @@ class ConfirmRequest(BaseModel):
     message: str
     account: Optional[str] = ""
 
+# Eventos enviados pelo MT5 para histórico
+class Mt5EventRequest(BaseModel):
+    signal_id: str
+    event_type: str
+    status: str | None = None
+    comment: str | None = None
+    account: str | None = None
+    ticket: int | None = None
+    symbol: str | None = None
+    price: float | None = None
+
 # =============================================================================
 # NOTIFICAÇÃO TELEGRAM
 # =============================================================================
@@ -832,10 +843,10 @@ async def get_pending(authorization: str = Header(""), symbol: str = ""):
     }
 
     return JSONResponse(status_code=200, content=sinal)
+
 # =============================================================================
-# CORREÇÃO PRINCIPAL: /signal/confirm sempre retorna 200
-# IDs desconhecidos são aceitos silenciosamente — o sinal foi removido por
-# outro EA ou já expirou. Retornar 400 causava loop infinito nos EAs.
+# /signal/confirm
+# Sempre retorna 200 para o EA.
 # =============================================================================
 @app.post("/signal/confirm")
 async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
@@ -843,6 +854,7 @@ async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
 
     try:
         with engine.begin() as conn:
+
             sinal = conn.execute(
                 text("""
                     SELECT
@@ -858,67 +870,98 @@ async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
                     WHERE id = :id
                     LIMIT 1
                 """),
-                {"id": body.id}
+                {
+                    "id": body.id
+                }
             ).mappings().first()
 
+            # -------------------------------------------------------------
             # ID desconhecido
+            # -------------------------------------------------------------
             if not sinal:
                 log.info(
                     f"Confirmação de ID desconhecido: {body.id} | "
                     f"{body.status} — aceito sem erro"
                 )
+
                 return {
                     "ok": True,
                     "id": body.id,
                     "status": "not_found_ignored"
                 }
 
-            # Confirmação duplicada
-            if sinal["status"] != "pending":
+            # -------------------------------------------------------------
+            # Já foi confirmado anteriormente
+            # -------------------------------------------------------------
+            if sinal["status"] not in ("pending", "waiting_entry"):
                 log.info(
                     f"Confirmação duplicada ignorada: {body.id} | "
                     f"status atual={sinal['status']}"
                 )
+
                 return {
                     "ok": True,
                     "id": body.id,
                     "status": "already_confirmed"
                 }
 
-            # Atualiza o sinal
-            conn.execute(
-            text("""
-                UPDATE signals
-                SET
-                    status = :status,
-                    executed_at = CASE
-                        WHEN :status = 'executed' THEN NOW()
-                        ELSE executed_at
-                    END,
-                    execution_message = :message,
-                    account = :account
-                WHERE id = :id
-                AND status = 'pending'
-            """),
-            {
-                "id": body.id,
-                "status": body.status,
-                "message": body.message,
-                "account": str(body.account) if body.account is not None else None
-            }
-        )
+            # -------------------------------------------------------------
+            # Atualiza confirmação recebida do MT5
+            # -------------------------------------------------------------
+            resultado = conn.execute(
+                text("""
+                    UPDATE signals
+                    SET
+                        status = :status,
 
+                        executed_at = CASE
+                            WHEN :is_executed THEN NOW()
+                            ELSE executed_at
+                        END,
+
+                        execution_message = :message,
+                        account = :account
+
+                    WHERE id = :id
+                        AND status IN ('pending', 'waiting_entry')
+                """),
+                {
+                    "id": body.id,
+                    "status": body.status,
+                    "is_executed": body.status == "executed",
+                    "message": body.message,
+                    "account": (
+                        str(body.account)
+                        if body.account is not None
+                        else None
+                    )
+                }
+            )
+
+            if resultado.rowcount == 0:
+                log.info(
+                    f"Confirmação não alterou registro: {body.id} | "
+                    f"status={body.status}"
+                )
+
+        # -----------------------------------------------------------------
+        # Confirmação gravada
+        # -----------------------------------------------------------------
         log.info(
             f"Confirmação MT5: {body.id} | "
             f"{body.status} | {body.message}"
         )
 
-        # Notificações
+        # -----------------------------------------------------------------
+        # NOTIFICAÇÕES
+        # -----------------------------------------------------------------
         if body.status == "executed":
+
             emoji = "🟢" if sinal.get("type") == "BUY" else "🔴"
 
             msg = (
-                f"{emoji} <b>{sinal.get('type')}  •  {sinal.get('symbol')}</b>\n"
+                f"{emoji} <b>{sinal.get('type')}  •  "
+                f"{sinal.get('symbol')}</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"✅ <b>Ordem aberta no MT5</b>\n"
                 f"💲 Entry: <code>{sinal.get('entry')}</code>\n"
@@ -932,8 +975,10 @@ async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
             await enviar_telegram(msg)
 
         elif body.status == "failed":
+
             msg = (
-                f"⚠️ <b>Falha ao abrir ordem — {sinal.get('symbol')}</b>\n"
+                f"⚠️ <b>Falha ao abrir ordem — "
+                f"{sinal.get('symbol')}</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"❌ Status: <code>failed</code>\n"
                 f"📋 Motivo: {body.message}\n"
@@ -949,9 +994,8 @@ async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
             "status": body.status
         }
 
-    except Exception as e:
-        # Mantém a regra original:
-        # nunca retornar 500 para o EA.
+    except Exception:
+        # Nunca retorna 500 para o EA
         log.exception(
             f"Erro inesperado em /signal/confirm | id={body.id}"
         )
@@ -961,7 +1005,85 @@ async def confirm_signal(body: ConfirmRequest, authorization: str = Header("")):
             "id": body.id,
             "status": "error_ignored"
         }
-    
+# =============================================================================
+# EVENTOS MT5 - HISTÓRICO DE EXECUÇÃO
+# Registra no banco os eventos ocorridos no MT5 relacionados a cada sinal,
+# como criação de ordem, execução, rejeição, cancelamento, timeout, TP e SL.
+# Este endpoint é apenas para auditoria e não altera o status principal do sinal.
+# ============================================================================= 
+@app.post("/signal/mt5-event")
+async def signal_mt5_event(
+    body: Mt5EventRequest,
+    authorization: str = Header("")
+):
+    check_token(authorization)
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO signal_mt5_events (
+                        signal_id,
+                        event_type,
+                        status,
+                        comment,
+                        account,
+                        ticket,
+                        symbol,
+                        price,
+                        created_at
+                    )
+                    VALUES (
+                        :signal_id,
+                        :event_type,
+                        :status,
+                        :comment,
+                        :account,
+                        :ticket,
+                        :symbol,
+                        :price,
+                        NOW()
+                    )
+                """),
+                {
+                    "signal_id": body.signal_id,
+                    "event_type": body.event_type,
+                    "status": body.status,
+                    "comment": body.comment,
+                    "account": body.account,
+                    "ticket": body.ticket,
+                    "symbol": body.symbol,
+                    "price": body.price
+                }
+            )
+
+        log.info(
+            f"Evento MT5 salvo | "
+            f"Sinal: {body.signal_id} | "
+            f"Evento: {body.event_type} | "
+            f"Status: {body.status} | "
+            f"Ticket: {body.ticket}"
+        )
+
+        return {
+            "ok": True,
+            "signal_id": body.signal_id,
+            "event_type": body.event_type
+        }
+
+    except Exception:
+        log.exception(
+            f"Erro ao salvar evento MT5 | "
+            f"Sinal: {body.signal_id} | "
+            f"Evento: {body.event_type}"
+        )
+
+        return {
+            "ok": False,
+            "signal_id": body.signal_id,
+            "event_type": body.event_type
+        }
+       
 @app.get("/signals/queue")
 async def get_queue(authorization: str = Header("")):
     check_token(authorization)
