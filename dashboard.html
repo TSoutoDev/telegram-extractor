@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TS Signal Dashboard</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            font-family: Arial, Helvetica, sans-serif;
+            background: #f5f7fa;
+            color: #1f2937;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 28px;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 25px;
+        }
+
+        .header h1 {
+            margin: 0;
+            font-size: 26px;
+            font-weight: 700;
+        }
+
+        .header p {
+            margin: 6px 0 0;
+            color: #6b7280;
+            font-size: 14px;
+        }
+
+        .status {
+            background: #ecfdf5;
+            color: #047857;
+            border: 1px solid #a7f3d0;
+            padding: 8px 14px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: bold;
+        }
+
+        .cards {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 18px;
+            margin-bottom: 25px;
+        }
+
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid #e5e7eb;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
+        }
+
+        .card-title {
+            color: #6b7280;
+            font-size: 13px;
+            margin-bottom: 10px;
+        }
+
+        .card-value {
+            font-size: 28px;
+            font-weight: bold;
+        }
+
+        .positivo {
+            color: #059669;
+        }
+
+        .negativo {
+            color: #dc2626;
+        }
+
+        .section {
+            background: white;
+            border-radius: 12px;
+            padding: 22px;
+            border: 1px solid #e5e7eb;
+            margin-bottom: 22px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
+        }
+
+        .section-title {
+            margin: 0 0 18px;
+            font-size: 17px;
+            font-weight: 700;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th {
+            text-align: left;
+            font-size: 12px;
+            color: #6b7280;
+            background: #f9fafb;
+            padding: 12px;
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        td {
+            padding: 14px 12px;
+            border-bottom: 1px solid #f1f5f9;
+            font-size: 14px;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 5px 9px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: bold;
+        }
+
+        .badge-buy {
+            background: #ecfdf5;
+            color: #047857;
+        }
+
+        .badge-sell {
+            background: #fef2f2;
+            color: #b91c1c;
+        }
+
+        .badge-executed {
+            background: #eff6ff;
+            color: #1d4ed8;
+        }
+
+        .badge-cancelled {
+            background: #f3f4f6;
+            color: #4b5563;
+        }
+
+        .footer {
+            text-align: center;
+            color: #9ca3af;
+            font-size: 12px;
+            padding: 15px;
+        }
+        .filtros {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 20px;
+        }
+
+        .filtro-btn {
+            border: 1px solid #d1d5db;
+            background: white;
+            color: #4b5563;
+            padding: 8px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+            transition: 0.2s;
+        }
+
+        .filtro-btn:hover {
+            background: #f3f4f6;
+        }
+
+        .filtro-btn.ativo {
+            background: #2563eb;
+            color: white;
+            border-color: #2563eb;
+        }
+        .paginacao {
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+            gap: 12px;
+            margin-top: 15px;
+        }
+
+        .pagina-btn {
+            border: 1px solid #d1d5db;
+            background: white;
+            color: #374151;
+            padding: 7px 14px;
+            border-radius: 7px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .pagina-btn:hover:not(:disabled) {
+            background: #f3f4f6;
+        }
+
+        .pagina-btn:disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+        }
+
+        #pagina-info {
+            font-size: 13px;
+            color: #6b7280;
+        }
+        @media (max-width: 900px) {
+            .cards {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .section {
+                overflow-x: auto;
+            }
+        }
+
+        @media (max-width: 550px) {
+            .cards {
+                grid-template-columns: 1fr;
+            }
+
+            .container {
+                padding: 15px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="container">
+
+    <div class="header">
+        <div>
+            <h1>TS Signal Dashboard</h1>
+            <p>Monitoramento Telegram → MT5</p>
+        </div>
+
+        <div class="status">
+            ● Sistema online
+        </div>
+    </div>
+
+   <div class="filtros">
+        <button class="filtro-btn ativo" data-periodo="hoje">Hoje</button>
+        <button class="filtro-btn" data-periodo="7">7 dias</button>
+        <button class="filtro-btn" data-periodo="30">30 dias</button>
+        <button class="filtro-btn" data-periodo="tudo">Tudo</button>
+    </div>
+
+    <div class="cards">
+
+        <div class="card">
+            <div class="card-title">Sinais recebidos</div>
+            <div class="card-value" id="total-sinais">--</div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Ordens executadas</div>
+            <div class="card-value" id="total-executadas">--</div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Ordens canceladas</div>
+            <div class="card-value" id="total-canceladas">--</div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Resultado líquido</div>
+            <div class="card-value positivo" id="resultado-liquido">$ --</div>
+        </div>
+
+    </div>
+
+    <div class="section">
+
+        <h2 class="section-title">Resultado por grupo</h2>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Grupo</th>
+                    <th>Sinais</th>
+                    <th>Ordens</th>
+                    <th>Canceladas</th>
+                    <th>Lucro</th>
+                    <th>Prejuízo</th>
+                    <th>Líquido</th>
+                </tr>
+            </thead>
+
+           <tbody id="tabela-grupos">
+                <tr>
+                    <td colspan="7">Carregando...</td>
+                </tr>
+            </tbody>
+
+        </table>
+
+    </div>
+
+    <div class="section">
+
+        <h2 class="section-title">Últimos sinais</h2>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Horário</th>
+                    <th>Grupo</th>
+                    <th>Tipo</th>
+                    <th>Entrada</th>
+                    <th>SL</th>
+                    <th>Status</th>
+                    <th>Resultado</th>
+                </tr>
+            </thead>
+
+            <tbody id="tabela-ultimos-sinais">
+                <tr>
+                    <td colspan="7">Carregando...</td>
+                </tr>
+            </tbody>
+
+        </table>
+
+        <div class="paginacao">
+            <button id="btn-anterior" class="pagina-btn">
+                Anterior
+            </button>
+
+            <span id="pagina-info">
+                Página 1 de 1
+            </span>
+
+            <button id="btn-proxima" class="pagina-btn">
+                Próxima
+            </button>
+        </div>
+
+    </div>
+
+    <div class="footer">
+        TS Signal Bridge
+    </div>
+
+</div>
+<script>
+    let periodoAtual = 'hoje';
+    let paginaAtual = 1;
+    const porPagina = 20;
+    
+    async function carregarDashboard(periodo = periodoAtual, pagina = paginaAtual) 
+    {
+        try {
+            const response = await fetch(
+                `/dashboard/data?periodo=${periodo}&page=${pagina}&page_size=${porPagina}`
+            );
+
+            if (!response.ok) {
+                throw new Error('Erro ao consultar dashboard');
+            }
+
+            const dados = await response.json();
+
+            document.getElementById('total-sinais').textContent =
+                dados.sinais;
+
+            document.getElementById('total-executadas').textContent =
+                dados.ordens_executadas;
+
+            document.getElementById('total-canceladas').textContent =
+                dados.ordens_canceladas;
+            
+            const resultado = Number(dados.resultado_liquido || 0);
+
+            const elementoResultado =
+                document.getElementById('resultado-liquido');
+
+            const tabelaGrupos = document.getElementById('tabela-grupos');
+
+            tabelaGrupos.innerHTML = '';
+
+            dados.grupos.forEach(grupo => {
+
+                const classeLiquido =
+                    grupo.liquido >= 0 ? 'positivo' : 'negativo';
+
+                const linha = document.createElement('tr');
+
+                linha.innerHTML = `
+                    <td>${grupo.grupo}</td>
+                    <td>${grupo.sinais}</td>
+                    <td>${grupo.ordens}</td>
+                    <td>${grupo.canceladas}</td>
+
+                    <td class="positivo">
+                        ${Number(grupo.lucro).toLocaleString('pt-BR', {
+                            style: 'currency',
+                            currency: 'USD'
+                        })}
+                    </td>
+
+                    <td class="negativo">
+                        ${Number(grupo.prejuizo).toLocaleString('pt-BR', {
+                            style: 'currency',
+                            currency: 'USD'
+                        })}
+                    </td>
+
+                    <td class="${classeLiquido}">
+                        <strong>
+                            ${Number(grupo.liquido).toLocaleString('pt-BR', {
+                                style: 'currency',
+                                currency: 'USD'
+                            })}
+                        </strong>
+                    </td>
+                `;
+
+                tabelaGrupos.appendChild(linha);
+            });
+
+
+            const tabelaUltimos =
+                document.getElementById('tabela-ultimos-sinais');
+
+            tabelaUltimos.innerHTML = '';
+
+            dados.ultimos_sinais.forEach(sinal => {
+
+                const data = new Date(sinal.horario);
+
+                const horario = data.toLocaleTimeString('pt-BR', {
+                    hour: '2-digit',
+                    minute: '2-digit'
+                });
+
+                const classeTipo =
+                    sinal.tipo === 'BUY'
+                        ? 'badge-buy'
+                        : 'badge-sell';
+
+                const classeStatus =
+                    sinal.status === 'cancelled'
+                        ? 'badge-cancelled'
+                        : 'badge-executed';
+
+                const textoStatus =
+                    sinal.status === 'cancelled'
+                        ? 'CANCELADO'
+                        : 'EXECUTADO';
+
+                const classeResultado =
+                    sinal.resultado > 0
+                        ? 'positivo'
+                        : sinal.resultado < 0
+                            ? 'negativo'
+                            : '';
+
+                let entrada = Number(sinal.entry).toFixed(2);
+
+                if (
+                    sinal.entry_min &&
+                    sinal.entry_max &&
+                    sinal.entry_min !== sinal.entry_max
+                ) {
+                    entrada =
+                        Number(sinal.entry_min).toFixed(2) +
+                        ' - ' +
+                        Number(sinal.entry_max).toFixed(2);
+                }
+
+                const resultado =
+                    Number(sinal.resultado).toLocaleString('pt-BR', {
+                        style: 'currency',
+                        currency: 'USD'
+                    });
+
+                const linha = document.createElement('tr');
+
+                linha.innerHTML = `
+                    <td>${horario}</td>
+
+                    <td>${sinal.grupo}</td>
+
+                    <td>
+                        <span class="badge ${classeTipo}">
+                            ${sinal.tipo}
+                        </span>
+                    </td>
+
+                    <td>${entrada}</td>
+
+                    <td>${Number(sinal.sl).toFixed(2)}</td>
+
+                    <td>
+                        <span class="badge ${classeStatus}">
+                            ${textoStatus}
+                        </span>
+                    </td>
+
+                    <td class="${classeResultado}">
+                        <strong>${resultado}</strong>
+                    </td>
+                `;
+
+                tabelaUltimos.appendChild(linha);
+            });
+
+            const paginacao = dados.paginacao;
+
+            document.getElementById('pagina-info').textContent =
+                `Página ${paginacao.pagina_atual} de ${paginacao.total_paginas || 1}`;
+
+            document.getElementById('btn-anterior').disabled =
+                !paginacao.tem_anterior;
+
+            document.getElementById('btn-proxima').disabled =
+                !paginacao.tem_proxima;
+
+            elementoResultado.textContent =
+                resultado.toLocaleString('pt-BR', {
+                    style: 'currency',
+                    currency: 'USD'
+                });
+
+            elementoResultado.classList.remove('positivo', 'negativo');
+
+            if (resultado >= 0) {
+                elementoResultado.classList.add('positivo');
+            }
+            else {
+                elementoResultado.classList.add('negativo');
+            }
+        }
+        catch (erro) {
+            console.error('Erro ao carregar dashboard:', erro);
+        }
+    }
+
+    carregarDashboard();
+
+    document.getElementById('btn-anterior')
+        .addEventListener('click', function() {
+
+            if (paginaAtual > 1) {
+                paginaAtual--;
+
+                carregarDashboard(
+                    periodoAtual,
+                    paginaAtual
+                );
+            }
+        });
+
+    document.getElementById('btn-proxima')
+        .addEventListener('click', function() {
+
+            paginaAtual++;
+
+            carregarDashboard(
+                periodoAtual,
+                paginaAtual
+            );
+        });
+
+    document.querySelectorAll('.filtro-btn').forEach(botao => {
+
+        botao.addEventListener('click', function() {
+
+            document.querySelectorAll('.filtro-btn')
+                .forEach(b => b.classList.remove('ativo'));
+
+            this.classList.add('ativo');
+
+            periodoAtual = this.dataset.periodo;
+            paginaAtual = 1;
+
+            carregarDashboard(periodoAtual, paginaAtual);
+            
+            // Atualiza o dashboard automaticamente a cada 15 segundos
+            setInterval(() => 
+                {
+                 carregarDashboard(periodoAtual);
+                }, 60000);
+        });
+    });
+
+</script>
+</body>
+</html>

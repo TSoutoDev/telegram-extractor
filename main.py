@@ -13,6 +13,9 @@ from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
+from pathlib import Path
+from fastapi.responses import FileResponse
+
 # ── logging ───────────────────────────────────────────────────────────────────
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -135,6 +138,416 @@ SIGNAL_GROUPS = [
 
 # ── app ───────────────────────────────────────────────────────────────────────
 app = FastAPI(title="TS Signal Bridge", version="2.7.1")
+
+BASE_DIR = Path(__file__).resolve().parent
+
+
+@app.get("/dashboard", include_in_schema=False)
+def dashboard():
+    return FileResponse(
+        str(BASE_DIR / "dashboard.html"),
+        media_type="text/html"
+    )
+
+dashboard_engine = create_engine(
+    os.environ["DATABASE_URL"],
+    pool_pre_ping=True
+)
+
+@app.get("/dashboard/data", include_in_schema=False)
+def dashboard_data(
+    periodo: str = "hoje",
+    page: int = 1,
+    page_size: int = 20
+):
+
+    if periodo not in {"hoje", "7", "30", "tudo"}:
+        periodo = "hoje"
+
+    if page < 1:
+        page = 1
+
+    if page_size < 1:
+        page_size = 20
+
+    if page_size > 100:
+        page_size = 100
+
+    offset = (page - 1) * page_size
+
+    with dashboard_engine.connect() as conn:
+
+        resumo = conn.execute(text("""
+            SELECT
+
+                (
+                    SELECT COUNT(*)
+                    FROM signals s
+                    WHERE
+                        :periodo = 'tudo'
+
+                        OR (
+                            :periodo = 'hoje'
+                            AND (s.received_at AT TIME ZONE 'America/Sao_Paulo')::date
+                                = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
+                        )
+
+                        OR (
+                            :periodo = '7'
+                            AND s.received_at >= NOW() - INTERVAL '7 days'
+                        )
+
+                        OR (
+                            :periodo = '30'
+                            AND s.received_at >= NOW() - INTERVAL '30 days'
+                        )
+                ) AS sinais,
+
+                (
+                    SELECT COUNT(*)
+                    FROM signal_mt5_events e
+                    INNER JOIN signals s
+                        ON s.id = e.signal_id
+                    WHERE
+                        e.event_type IN ('MARKET_EXECUTED', 'PENDING_EXECUTED')
+
+                        AND (
+                            :periodo = 'tudo'
+
+                            OR (
+                                :periodo = 'hoje'
+                                AND (s.received_at AT TIME ZONE 'America/Sao_Paulo')::date
+                                    = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
+                            )
+
+                            OR (
+                                :periodo = '7'
+                                AND s.received_at >= NOW() - INTERVAL '7 days'
+                            )
+
+                            OR (
+                                :periodo = '30'
+                                AND s.received_at >= NOW() - INTERVAL '30 days'
+                            )
+                        )
+                ) AS ordens_executadas,
+
+                (
+                    SELECT COUNT(*)
+                    FROM signal_mt5_events e
+                    INNER JOIN signals s
+                        ON s.id = e.signal_id
+                    WHERE
+                        e.event_type = 'PENDING_CANCELLED_TP1_ALREADY_HIT'
+
+                        AND (
+                            :periodo = 'tudo'
+
+                            OR (
+                                :periodo = 'hoje'
+                                AND (s.received_at AT TIME ZONE 'America/Sao_Paulo')::date
+                                    = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
+                            )
+
+                            OR (
+                                :periodo = '7'
+                                AND s.received_at >= NOW() - INTERVAL '7 days'
+                            )
+
+                            OR (
+                                :periodo = '30'
+                                AND s.received_at >= NOW() - INTERVAL '30 days'
+                            )
+                        )
+                ) AS ordens_canceladas,
+
+                (
+                    SELECT COALESCE(
+                        SUM(
+                            substring(
+                                e.comment
+                                FROM 'resultado (-?[0-9]+[.]?[0-9]*) USD'
+                            )::numeric
+                        ),
+                        0
+                    )
+                    FROM signal_mt5_events e
+
+                    INNER JOIN signals s
+                        ON s.id = e.signal_id
+
+                    WHERE
+                        e.event_type = 'POSITION_CLOSED'
+
+                        AND (
+                            :periodo = 'tudo'
+
+                            OR (
+                                :periodo = 'hoje'
+                                AND (s.received_at AT TIME ZONE 'America/Sao_Paulo')::date
+                                    = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
+                            )
+
+                            OR (
+                                :periodo = '7'
+                                AND s.received_at >= NOW() - INTERVAL '7 days'
+                            )
+
+                            OR (
+                                :periodo = '30'
+                                AND s.received_at >= NOW() - INTERVAL '30 days'
+                            )
+                        )
+                ) AS resultado_liquido
+
+        """), {
+            "periodo": periodo
+        }).mappings().one()
+
+
+        grupos = conn.execute(text("""
+            SELECT
+                COALESCE(s.source, 'Sem grupo') AS grupo,
+
+                COUNT(DISTINCT s.id) AS sinais,
+
+                COUNT(*) FILTER (
+                    WHERE e.event_type IN (
+                        'MARKET_EXECUTED',
+                        'PENDING_EXECUTED'
+                    )
+                ) AS ordens,
+
+                COUNT(*) FILTER (
+                    WHERE e.event_type =
+                        'PENDING_CANCELLED_TP1_ALREADY_HIT'
+                ) AS canceladas,
+
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN e.event_type = 'POSITION_CLOSED'
+                            AND substring(
+                                e.comment
+                                FROM 'resultado (-?[0-9]+[.]?[0-9]*) USD'
+                            )::numeric > 0
+
+                            THEN substring(
+                                e.comment
+                                FROM 'resultado (-?[0-9]+[.]?[0-9]*) USD'
+                            )::numeric
+
+                            ELSE 0
+                        END
+                    ),
+                    0
+                ) AS lucro,
+
+                COALESCE(
+                    ABS(
+                        SUM(
+                            CASE
+                                WHEN e.event_type = 'POSITION_CLOSED'
+                                AND substring(
+                                    e.comment
+                                    FROM 'resultado (-?[0-9]+[.]?[0-9]*) USD'
+                                )::numeric < 0
+
+                                THEN substring(
+                                    e.comment
+                                    FROM 'resultado (-?[0-9]+[.]?[0-9]*) USD'
+                                )::numeric
+
+                                ELSE 0
+                            END
+                        )
+                    ),
+                    0
+                ) AS prejuizo,
+
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN e.event_type = 'POSITION_CLOSED'
+                            THEN substring(
+                                e.comment
+                                FROM 'resultado (-?[0-9]+[.]?[0-9]*) USD'
+                            )::numeric
+                            ELSE 0
+                        END
+                    ),
+                    0
+                ) AS liquido
+
+            FROM signals s
+
+            LEFT JOIN signal_mt5_events e
+                ON e.signal_id = s.id
+
+            WHERE
+                :periodo = 'tudo'
+
+                OR (
+                    :periodo = 'hoje'
+                    AND (s.received_at AT TIME ZONE 'America/Sao_Paulo')::date
+                        = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
+                )
+
+                OR (
+                    :periodo = '7'
+                    AND s.received_at >= NOW() - INTERVAL '7 days'
+                )
+
+                OR (
+                    :periodo = '30'
+                    AND s.received_at >= NOW() - INTERVAL '30 days'
+                )
+
+            GROUP BY s.source
+
+            ORDER BY liquido DESC
+
+        """), {
+            "periodo": periodo
+        }).mappings().all()
+
+        total_ultimos_sinais = conn.execute(text("""
+            SELECT COUNT(*)
+
+            FROM signals s
+
+            WHERE
+                :periodo = 'tudo'
+
+                OR (
+                    :periodo = 'hoje'
+                    AND (s.received_at AT TIME ZONE 'America/Sao_Paulo')::date
+                        = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
+                )
+
+                OR (
+                    :periodo = '7'
+                    AND s.received_at >= NOW() - INTERVAL '7 days'
+                )
+
+                OR (
+                    :periodo = '30'
+                    AND s.received_at >= NOW() - INTERVAL '30 days'
+                )
+        """), {
+            "periodo": periodo
+        }).scalar_one()
+                
+        ultimos_sinais = conn.execute(text("""
+            SELECT
+                s.id,
+                s.received_at,
+                s.source AS grupo,
+                s.type,
+                s.entry,
+                s.entry_min,
+                s.entry_max,
+                s.sl,
+                s.status,
+
+                COALESCE(
+                    (
+                        SELECT SUM(
+                            substring(
+                                e.comment
+                                FROM 'resultado (-?[0-9]+[.]?[0-9]*) USD'
+                            )::numeric
+                        )
+                        FROM signal_mt5_events e
+
+                        WHERE e.signal_id = s.id
+                          AND e.event_type = 'POSITION_CLOSED'
+                    ),
+                    0
+                ) AS resultado
+
+            FROM signals s
+
+            WHERE
+                :periodo = 'tudo'
+
+                OR (
+                    :periodo = 'hoje'
+                    AND (s.received_at AT TIME ZONE 'America/Sao_Paulo')::date
+                        = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
+                )
+
+                OR (
+                    :periodo = '7'
+                    AND s.received_at >= NOW() - INTERVAL '7 days'
+                )
+
+                OR (
+                    :periodo = '30'
+                    AND s.received_at >= NOW() - INTERVAL '30 days'
+                )
+
+            ORDER BY s.received_at DESC
+
+            LIMIT :page_size
+            OFFSET :offset
+
+        """), {
+                "periodo": periodo,
+                "page_size": page_size,
+                "offset": offset
+            }).mappings().all()
+
+        total_paginas = (total_ultimos_sinais + page_size - 1) // page_size
+
+        return {
+            "sinais": int(resumo["sinais"] or 0),
+            "ordens_executadas":
+                int(resumo["ordens_executadas"] or 0),
+            "ordens_canceladas":
+                int(resumo["ordens_canceladas"] or 0),
+            "resultado_liquido":
+                float(resumo["resultado_liquido"] or 0),
+
+            "grupos": [
+                {
+                    "grupo": item["grupo"],
+                    "sinais": int(item["sinais"] or 0),
+                    "ordens": int(item["ordens"] or 0),
+                    "canceladas": int(item["canceladas"] or 0),
+                    "lucro": float(item["lucro"] or 0),
+                    "prejuizo": float(item["prejuizo"] or 0),
+                    "liquido": float(item["liquido"] or 0)
+                }
+                for item in grupos
+            ],
+
+            "ultimos_sinais": [
+                {
+                    "id": str(item["id"]),
+                    "horario": item["received_at"].isoformat(),
+                    "grupo": item["grupo"] or "Sem grupo",
+                    "tipo": item["type"],
+                    "entry": float(item["entry"] or 0),
+                    "entry_min": float(item["entry_min"] or 0),
+                    "entry_max": float(item["entry_max"] or 0),
+                    "sl": float(item["sl"] or 0),
+                    "status": item["status"],
+                    "resultado": float(item["resultado"] or 0)
+                }
+                for item in ultimos_sinais
+            ],
+
+            "paginacao": {
+                "pagina_atual": page,
+                "por_pagina": page_size,
+                "total_registros": int(total_ultimos_sinais),
+                "total_paginas": int(total_paginas),
+                "tem_anterior": page > 1,
+                "tem_proxima": page < total_paginas
+            }
+        }
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -328,9 +741,31 @@ def convert_pips_to_prices(entry: float, pip_targets: list, trade_type: str, sym
     return result
 
 def parse_signal(text: str) -> Optional[dict]:
-    text_clean = text.strip().replace("\\n", "\n")
+
+    text_clean = text.strip().replace("\\\n", "\n")
+
     text_clean = re.sub(r"\s*[|;]\s*", "\n", text_clean)
+
+    # Normaliza diferentes formatos de zona de entrada.
+    #
+    # Exemplos aceitos:
+    # 4305/4302
+    # 4305 / 4302
+    # 4293//4296
+    # 4293// 4296
+    # 4293 // 4296
+    # 4340_4337
+    # 4340 _ 4337
+    #
+    # Todos se tornam internamente: 4305/4302
+    text_clean = re.sub(
+        r"(?<=\d)\s*(?:/+|_)\s*(?=\d)",
+        "/",
+        text_clean
+    )
+
     lines = [l.strip() for l in text_clean.split("\n") if l.strip()]
+
     if not lines:
         return None
 
@@ -339,13 +774,21 @@ def parse_signal(text: str) -> Optional[dict]:
         return None
 
     symbol = None
+
     for search in [l.upper() for l in lines]:
         for key, val in SYMBOL_MAP.items():
             if key.upper() in search:
                 symbol = val
                 break
+
         if symbol:
             break
+
+    # Alguns provedores usam GOLD em vez de XAUUSD.
+    # Exemplo: GOLD BUY NOW 4323/4318
+    if not symbol and re.search(r"\bGOLD\b", text_clean.upper()):
+        symbol = "XAUUSD"
+
     if not symbol:
         return None
 
